@@ -1,0 +1,8 @@
+{
+    "bbs_enabled": true,
+    "bbs_nodes": [],
+    "bbs_boards": ["GENERAL", "ANNOUNCEMENTS", "TECH", "TEST"],
+    "auto_response_enabled": true,
+    "auto_response_delay": 3.0,
+    "sync_interval_minutes": 15
+} 
