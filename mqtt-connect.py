@@ -98,117 +98,6 @@ def clear_user_states(user_id):
     if debug:
         print(f"Cleared all states for user {user_id}")
 
-def send_bbs_message(message, destination_id):
-    """Send a BBS message using MQTT instead of direct interface."""
-    max_payload_size = 200
-    for i in range(0, len(message), max_payload_size):
-        chunk = message[i:i + max_payload_size]
-        try:
-            # Use the existing MQTT message sending function
-            encoded_message = mesh_pb2.Data()
-            encoded_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
-            encoded_message.payload = chunk.encode("utf-8")
-            encoded_message.bitfield = 1
-            
-            generate_mesh_packet(destination_id, encoded_message)
-            
-            dest_name = get_name_by_id("short", destination_id)
-            chunk_display = chunk.replace('\n', '\\n')
-            if debug:
-                print(f"BBS: Sending message to user '{dest_name}' ({destination_id}): \"{chunk_display}\"")
-            
-        except Exception as e:
-            if debug:
-                print(f"BBS REPLY SEND ERROR: {str(e)}")
-        
-        time.sleep(2)
-
-def send_mail_to_bbs_nodes(sender_id, sender_short_name, recipient_id, subject, content, unique_id, bbs_nodes):
-    """Send mail to other BBS nodes via MQTT."""
-    message = f"MAIL|{sender_id}|{sender_short_name}|{recipient_id}|{subject}|{content}|{unique_id}"
-    if debug:
-        print(f"BBS SERVER SYNC: Syncing new mail message '{subject}' sent from {sender_short_name} to other BBS systems.")
-    for node_id in bbs_nodes:
-        send_bbs_message(message, node_id)
-
-def send_delete_bulletin_to_bbs_nodes(bulletin_id, bbs_nodes):
-    """Send bulletin deletion to other BBS nodes via MQTT."""
-    message = f"DELETE_BULLETIN|{bulletin_id}"
-    for node_id in bbs_nodes:
-        send_bbs_message(message, node_id)
-
-def send_delete_mail_to_bbs_nodes(unique_id, bbs_nodes):
-    """Send mail deletion to other BBS nodes via MQTT."""
-    message = f"DELETE_MAIL|{unique_id}"
-    if debug:
-        print(f"BBS SERVER SYNC: Sending delete mail sync message with unique_id: {unique_id}")
-    for node_id in bbs_nodes:
-        send_bbs_message(message, node_id)
-
-def send_channel_to_bbs_nodes(name, url, bbs_nodes):
-    """Send channel info to other BBS nodes via MQTT."""
-    message = f"CHANNEL|{name}|{url}"
-    for node_id in bbs_nodes:
-        send_bbs_message(message, node_id)
-
-def process_bbs_message(text_payload, from_node):
-    """Process incoming BBS messages and handle different message types."""
-    if not text_payload.startswith(('BULLETIN|', 'MAIL|', 'DELETE_BULLETIN|', 'DELETE_MAIL|', 'CHANNEL|')):
-        return False  # Not a BBS message
-    
-    parts = text_payload.split('|')
-    message_type = parts[0]
-    
-    if debug:
-        print(f"BBS: Processing {message_type} message from {from_node}")
-    
-    if message_type == 'BULLETIN':
-        if len(parts) >= 6:
-            board, sender_short_name, subject, content, unique_id = parts[1:6]
-            # Handle bulletin message
-            if debug:
-                print(f"BBS: Received bulletin '{subject}' from {sender_short_name} on board {board}")
-            # TODO: Add bulletin processing logic
-            return True
-    
-    elif message_type == 'MAIL':
-        if len(parts) >= 7:
-            sender_id, sender_short_name, recipient_id, subject, content, unique_id = parts[1:7]
-            # Handle mail message
-            if debug:
-                print(f"BBS: Received mail '{subject}' from {sender_short_name} to {recipient_id}")
-            # TODO: Add mail processing logic
-            return True
-    
-    elif message_type == 'DELETE_BULLETIN':
-        if len(parts) >= 2:
-            bulletin_id = parts[1]
-            # Handle bulletin deletion
-            if debug:
-                print(f"BBS: Received bulletin deletion for ID {bulletin_id}")
-            # TODO: Add bulletin deletion logic
-            return True
-    
-    elif message_type == 'DELETE_MAIL':
-        if len(parts) >= 2:
-            unique_id = parts[1]
-            # Handle mail deletion
-            if debug:
-                print(f"BBS: Received mail deletion for ID {unique_id}")
-            # TODO: Add mail deletion logic
-            return True
-    
-    elif message_type == 'CHANNEL':
-        if len(parts) >= 3:
-            name, url = parts[1:3]
-            # Handle channel info
-            if debug:
-                print(f"BBS: Received channel info '{name}' -> {url}")
-            # TODO: Add channel processing logic
-            return True
-    
-    return False
-
 #################################
 ### Configuration Loading
 #################################
@@ -416,17 +305,14 @@ def is_valid_hex(test_value: str, minchars: Optional[int], maxchars: int) -> boo
 
     return valid_hex_return
 
-
 def set_topic():
-    """?"""
-
+    """Set the MQTT topic for subscribing and publishing."""
     if debug:
         print("set_topic")
     global subscribe_topic, publish_topic, node_number, node_name
     node_name = '!' + hex(node_number)[2:]
     subscribe_topic = root_topic + channel + "/#"
     publish_topic = root_topic + channel + "/" + node_name
-
 
 def current_time() -> str:
     """Return the current time (as an integer number of seconds since the epoch) as a string."""
@@ -509,8 +395,6 @@ def get_name_by_id(name_type: str, user_id: str) -> str:
 
     finally:
         db_connection.close()
-
-    return f"Unknown User ({hex_user_id})"
 
 
 def sanitize_string(input_str: str) -> str:
@@ -734,12 +618,6 @@ def process_message(mp, text_payload, is_encrypted):
                 print("Ignoring message from our own node")
             return
 
-        # Check if this is a BBS message first
-        if process_bbs_message(text_payload, from_node):
-            if debug:
-                print("BBS message processed, skipping regular message handling")
-            return  # BBS message handled, don't process as regular message
-
         # Needed for ACK
         message_id = getattr(mp, "id")
         want_ack: bool = getattr(mp, "want_ack")
@@ -763,8 +641,8 @@ def process_message(mp, text_payload, is_encrypted):
             if want_ack is True:
                 send_ack(from_node, message_id)
             
-            # Check if this is a main menu selection (M, F, menu, help, etc.)
-            if text_payload.strip().upper() in ['M', 'F', 'MENU', 'HELP']:
+            # Check if this is a main menu selection (M, menu, help, etc.)
+            if text_payload.strip().upper() in ['M', 'MENU', 'HELP']:
                 should_send_auto_response = False
                 if debug:
                     print(f"Main menu selection detected: {text_payload}")
@@ -777,6 +655,7 @@ def process_message(mp, text_payload, is_encrypted):
                 menu_thread.start()
             # Check if this is a mail menu selection when in mail system and at mail menu
             elif len(text_payload.strip()) == 1 and text_payload.strip().upper() in ['C', 'I', 'S', 'D'] and get_global_state(from_node) == 'mail' and get_submenu_state(from_node) == 'mail_menu':
+                should_send_auto_response = False
                 if debug:
                     print(f"Mail menu selection detected: {text_payload}")
                 # Handle mail menu selection in a separate thread with a small delay
@@ -786,16 +665,31 @@ def process_message(mp, text_payload, is_encrypted):
                 
                 mail_thread = threading.Thread(target=delayed_mail_response, daemon=True)
                 mail_thread.start()
+            # Check if this is a compose command when viewing inbox
+            elif text_payload.strip().upper() == 'C' and get_global_state(from_node) == 'mail' and (get_submenu_state(from_node) == 'inbox' or get_submenu_state(from_node) == 'viewing_inbox'):
+                should_send_auto_response = False
+                if debug:
+                    print(f"Compose mail command detected from inbox view: {from_node}")
+                # Handle compose mail command in a separate thread with a small delay
+                def delayed_compose_from_inbox_response():
+                    time.sleep(1.0)  # Wait 1 second
+                    send_compose_mail_menu(from_node)
+                
+                compose_from_inbox_thread = threading.Thread(target=delayed_compose_from_inbox_response, daemon=True)
+                compose_from_inbox_thread.start()
             # Check if this is a mail number selection when viewing inbox or sent mail in mail system
-            elif text_payload.strip().isdigit() and 1 <= int(text_payload.strip()) <= 3 and get_global_state(from_node) == 'mail' and (get_submenu_state(from_node) == 'inbox' or get_submenu_state(from_node) == 'sent'):
+            elif text_payload.strip().isdigit() and 1 <= int(text_payload.strip()) <= 3 and get_global_state(from_node) == 'mail' and (get_submenu_state(from_node) == 'inbox' or get_submenu_state(from_node) == 'sent' or get_submenu_state(from_node) == 'viewing_inbox'):
+                should_send_auto_response = False
                 mail_number = int(text_payload.strip())
                 if debug:
                     print(f"Mail selection detected: {mail_number}")
+                    print(f"Global state: {get_global_state(from_node)}")
+                    print(f"Submenu state: {get_submenu_state(from_node)}")
                 # Handle mail selection in a separate thread with a small delay
                 def delayed_mail_content_response():
                     time.sleep(1.0)  # Wait 1 second
                     submenu_state = get_submenu_state(from_node)
-                    if submenu_state == 'inbox':
+                    if submenu_state in ['inbox', 'viewing_inbox']:
                         send_mail_content(from_node, 'inbox', mail_number)
                     elif submenu_state == 'sent':
                         send_mail_content(from_node, 'sent', mail_number)
@@ -804,6 +698,7 @@ def process_message(mp, text_payload, is_encrypted):
                 mail_content_thread.start()
             # Check if this is a post number selection (1-3) when viewing posts in bulletin system
             elif text_payload.strip().isdigit() and 1 <= int(text_payload.strip()) <= 3 and get_global_state(from_node) == 'bulletin' and get_submenu_state(from_node) == 'posts':
+                should_send_auto_response = False
                 post_number = int(text_payload.strip())
                 if debug:
                     print(f"Post selection detected: {post_number}")
@@ -829,6 +724,7 @@ def process_message(mp, text_payload, is_encrypted):
                 post_thread.start()
             # Check if this is a board number selection (1-4) when in bulletin system
             elif text_payload.strip().isdigit() and 1 <= int(text_payload.strip()) <= 4 and get_global_state(from_node) == 'bulletin' and get_submenu_state(from_node) == 'boards':
+                should_send_auto_response = False
                 board_number = int(text_payload.strip())
                 if debug:
                     print(f"Board selection detected: {board_number}")
@@ -843,6 +739,7 @@ def process_message(mp, text_payload, is_encrypted):
                 board_thread.start()
             # Check if this is a back command when in mail system
             elif text_payload.strip().upper() == 'B' and get_global_state(from_node) == 'mail':
+                should_send_auto_response = False
                 if debug:
                     print(f"Mail back command detected from {from_node}")
                 # Handle mail back command based on current submenu state
@@ -856,7 +753,8 @@ def process_message(mp, text_payload, is_encrypted):
                         # Going back from viewing mail to inbox/sent
                         user_state = get_user_state(from_node)
                         if user_state and user_state.startswith('viewing_mail:'):
-                            mail_type = user_state.split(':')[1]
+                            parts = user_state.split(':')
+                            mail_type = parts[1]
                             if debug:
                                 print(f"Mail back command - Going back to {mail_type}")
                             if mail_type == 'inbox':
@@ -877,61 +775,14 @@ def process_message(mp, text_payload, is_encrypted):
                             print(f"Mail back command - Going back to main menu")
                         clear_user_states(from_node)
                         # Send welcome menu
-                        welcome_text = """Welcome to the DMV Mesh\n[M]ail\n[F]ortune"""
+                        welcome_text = "✉️Welcome to Mesh Mail!✉️"
                         send_direct_message(from_node, welcome_text)
                 
                 mail_back_thread = threading.Thread(target=delayed_mail_back_response, daemon=True)
                 mail_back_thread.start()
-            # Check if this is a back command when in bulletin system
-            elif text_payload.strip().upper() == 'B' and get_global_state(from_node) == 'bulletin':
-                if debug:
-                    print(f"Bulletin back command detected from {from_node}")
-                # Handle bulletin back command based on current submenu state
-                def delayed_bulletin_back_response():
-                    time.sleep(1.0)  # Wait 1 second
-                    submenu_state = get_submenu_state(from_node)
-                    if debug:
-                        print(f"Bulletin back command - Current submenu: {submenu_state}")
-                    
-                    if submenu_state == 'viewing_post':
-                        # Going back from a post to the posts list
-                        user_state = get_user_state(from_node)
-                        if user_state and user_state.startswith('viewing_post:'):
-                            board_name = user_state.split(':')[1]
-                            if debug:
-                                print(f"Bulletin back command - Going back to posts in {board_name}")
-                            # Find the board number for this board name
-                            boards = ["GENERAL", "ANNOUNCEMENTS", "TECH", "TEST"]
-                            try:
-                                board_number = boards.index(board_name) + 1
-                                update_submenu_state(from_node, 'posts')
-                                update_user_state(from_node, f'viewing_board:{board_name}')
-                                send_board_posts(from_node, board_number)
-                            except ValueError:
-                                # Fallback to GENERAL if board not found
-                                update_submenu_state(from_node, 'posts')
-                                update_user_state(from_node, 'viewing_board:GENERAL')
-                                send_board_posts(from_node, 1)
-                    elif submenu_state == 'posts':
-                        # Going back from posts list to board list
-                        if debug:
-                            print(f"Bulletin back command - Going back to board list")
-                        update_submenu_state(from_node, 'boards')
-                        update_user_state(from_node, None)  # Clear user state
-                        send_bulletin_boards(from_node)
-                    else:
-                        # Going back from board list to main menu
-                        if debug:
-                            print(f"Bulletin back command - Going back to main menu")
-                        clear_user_states(from_node)
-                        # Send welcome menu
-                        welcome_text = """Welcome to the DMV Mesh\n[M]ail\n[F]ortune"""
-                        send_direct_message(from_node, welcome_text)
-                
-                bulletin_back_thread = threading.Thread(target=delayed_bulletin_back_response, daemon=True)
-                bulletin_back_thread.start()
             # Check if this is content input for mail composition (highest priority - most specific state)
             elif get_global_state(from_node) == 'mail' and get_user_state(from_node) and get_user_state(from_node).startswith('composing_subject:'):
+                should_send_auto_response = False
                 if debug:
                     print(f"Mail content input detected: {text_payload}")
                 # Handle content input in a separate thread with a small delay
@@ -943,6 +794,7 @@ def process_message(mp, text_payload, is_encrypted):
                 content_thread.start()
             # Check if this is subject input for mail composition (medium priority)
             elif get_global_state(from_node) == 'mail' and get_user_state(from_node) and get_user_state(from_node).startswith('composing_to:'):
+                should_send_auto_response = False
                 if debug:
                     print(f"Mail subject input detected: {text_payload}")
                 # Handle subject input in a separate thread with a small delay
@@ -954,6 +806,7 @@ def process_message(mp, text_payload, is_encrypted):
                 subject_thread.start()
             # Check if this is recipient input for mail composition (lowest priority - most general state)
             elif get_global_state(from_node) == 'mail' and get_submenu_state(from_node) == 'compose_mail' and get_user_state(from_node) == 'composing_mail':
+                should_send_auto_response = False
                 if debug:
                     print(f"Mail recipient input detected: {text_payload}")
                     print(f"Global state: {get_global_state(from_node)}")
@@ -994,6 +847,81 @@ def process_message(mp, text_payload, is_encrypted):
                 
                 delete_menu_thread = threading.Thread(target=delayed_delete_menu_response, daemon=True)
                 delete_menu_thread.start()
+            # Check if this is a delete command when viewing a mail
+            elif text_payload.strip().upper() == 'D' and get_global_state(from_node) == 'mail' and get_submenu_state(from_node) == 'viewing_mail':
+                should_send_auto_response = False
+                if debug:
+                    print(f"Delete mail command detected from {from_node}")
+                # Handle delete mail command
+                def delayed_delete_mail_response():
+                    time.sleep(1.0)  # Wait 1 second
+                    user_state = get_user_state(from_node)
+                    if user_state and user_state.startswith('viewing_mail:'):
+                        parts = user_state.split(':')
+                        mail_type = parts[1]
+                        mail_id = int(parts[2])  # Get the specific mail ID
+                        
+                        # Delete the specific mail
+                        delete_mail(mail_id)
+                        
+                        # Send confirmation message
+                        success_msg = "Message Deleted"
+                        time.sleep(2.0)
+                        send_direct_message(from_node, success_msg)
+                        
+                        # Wait a moment then show inbox again
+                        time.sleep(2.0)
+                        if mail_type == 'inbox':
+                            update_submenu_state(from_node, 'inbox')
+                            send_inbox(from_node, show_instructions=True)
+                        else:  # sent
+                            update_submenu_state(from_node, 'sent')
+                            send_sent_mail(from_node)
+                    else:
+                        error_msg = "Error: No mail context found."
+                        send_direct_message(from_node, error_msg)
+                
+                delete_mail_thread = threading.Thread(target=delayed_delete_mail_response, daemon=True)
+                delete_mail_thread.start()
+            # Check if this is a reply command when viewing a mail
+            elif text_payload.strip().upper() == 'R' and get_global_state(from_node) == 'mail' and get_submenu_state(from_node) == 'viewing_mail':
+                should_send_auto_response = False
+                if debug:
+                    print(f"Reply mail command detected from {from_node}")
+                # Handle reply mail command
+                def delayed_reply_mail_response():
+                    time.sleep(1.0)  # Wait 1 second
+                    user_state = get_user_state(from_node)
+                    if user_state and user_state.startswith('viewing_mail:'):
+                        parts = user_state.split(':')
+                        mail_type = parts[1]
+                        mail_id = int(parts[2])  # Get the specific mail ID
+                        
+                        # Get the mail content to find the original sender
+                        mail_data = get_mail_content(mail_id)
+                        if mail_data and mail_type == 'inbox':
+                            # For inbox mail, reply to the sender
+                            original_sender = mail_data['from_node_id']
+                            original_subject = mail_data['subject']
+                            
+                            # Set up reply composition with pre-filled subject
+                            reply_subject = f"Re: {original_subject}" if not original_subject.startswith("Re: ") else original_subject
+                            update_user_state(from_node, f'composing_subject:{original_sender}:{reply_subject}')
+                            update_submenu_state(from_node, 'compose_mail')
+                            
+                            # Ask for content directly (skip subject since it's pre-filled)
+                            content_prompt = f"Reply to: {original_sender}\nSubject: {reply_subject}\n\nEnter your reply message:"
+                            time.sleep(2.0)
+                            send_direct_message(from_node, content_prompt)
+                        else:
+                            error_msg = "Cannot reply to sent mail or mail not found."
+                            send_direct_message(from_node, error_msg)
+                    else:
+                        error_msg = "Error: No mail context found for reply."
+                        send_direct_message(from_node, error_msg)
+                
+                reply_mail_thread = threading.Thread(target=delayed_reply_mail_response, daemon=True)
+                reply_mail_thread.start()
             else:
                 # Mark that we should send welcome menu after processing
                 should_send_auto_response = True
@@ -1370,7 +1298,7 @@ def send_auto_response(destination_id):
         return
 
     # Create the welcome menu message
-    welcome_text = """Welcome to the DMV Mesh\n[M]ail\n[F]ortune"""
+    welcome_text = "✉️Welcome to Mesh Mail!✉️"
     
     try:
         if debug:
@@ -1525,7 +1453,7 @@ def send_auto_response_via_test_function(target_id):
 
     try:
         # Send welcome menu message
-        welcome_text = """Welcome to the DMV Mesh\n[M]ail\n[F]ortune"""
+        welcome_text = "✉️Welcome to Mesh Mail!✉️"
         
         global node_number
         node_number = int(node_number_entry.get())
@@ -1542,81 +1470,29 @@ def send_auto_response_via_test_function(target_id):
         
         if debug:
             print(f"Welcome menu sent to {target_id}")
+        
+        # Use threaded approach for delayed inbox display
+        def delayed_inbox_response():
+            time.sleep(3.0)  # Wait 3 seconds after welcome message
+            if debug:
+                print(f"Now sending inbox after 3 second delay to {target_id}")
+            # Set global state to mail and submenu state to inbox so mail number selection works
+            update_global_state(target_id, 'mail')
+            update_submenu_state(target_id, 'inbox')
+            update_user_state(target_id, 'viewing_inbox')
+            send_inbox(target_id, show_instructions=True)  # Let send_inbox handle the instructions
+            
+            if debug:
+                print(f"Set global state: {get_global_state(target_id)}")
+                print(f"Set submenu state: {get_submenu_state(target_id)}")
+                print(f"Set user state: {get_user_state(target_id)}")
+        
+        # Start the delayed inbox response in a separate thread
+        inbox_thread = threading.Thread(target=delayed_inbox_response, daemon=True)
+        inbox_thread.start()
             
     except Exception as e:
         print(f"Error sending welcome menu: {str(e)}")
-
-
-def send_test_bbs_message():
-    """Send a test BBS message to demonstrate BBS functionality."""
-    if debug:
-        print("Sending test BBS message")
-
-    if not client.is_connected():
-        if debug:
-            print("Not connected to MQTT broker, skipping test BBS message")
-        return
-
-    try:
-        # Send a test bulletin message
-        board = "TEST"
-        sender_short_name = short_name_entry.get()
-        subject = f"Test Bulletin at {format_time(current_time())}"
-        content = "This is a test bulletin message from the MQTT BBS integration."
-        unique_id = f"test_{int(time.time())}"
-        
-        if bbs_nodes:
-            send_bulletin_to_bbs_nodes(board, sender_short_name, subject, content, unique_id, bbs_nodes)
-            if debug:
-                print(f"Test BBS bulletin sent to {len(bbs_nodes)} BBS nodes")
-        else:
-            # Send as broadcast if no BBS nodes configured
-            test_message = f"BULLETIN|{board}|{sender_short_name}|{subject}|{content}|{unique_id}"
-            send_bbs_message(test_message, BROADCAST_NUM)
-            if debug:
-                print("Test BBS bulletin sent as broadcast")
-            
-    except Exception as e:
-        print(f"Error sending test BBS message: {str(e)}")
-
-
-def load_bbs_config():
-    """Load BBS configuration from JSON file."""
-    global bbs_enabled, bbs_nodes
-    try:
-        with open('bbs_config.json', 'r') as f:
-            config = json.load(f)
-            bbs_enabled = config.get('bbs_enabled', True)
-            bbs_nodes = config.get('bbs_nodes', [])
-            if debug:
-                print(f"BBS config loaded: enabled={bbs_enabled}, nodes={bbs_nodes}")
-    except FileNotFoundError:
-        if debug:
-            print("BBS config file not found, using defaults")
-    except Exception as e:
-        if debug:
-            print(f"Error loading BBS config: {str(e)}")
-
-
-def save_bbs_config():
-    """Save BBS configuration to JSON file."""
-    try:
-        config = {
-            'bbs_enabled': bbs_enabled,
-            'bbs_nodes': bbs_nodes,
-            'bbs_boards': ["GENERAL", "ANNOUNCEMENTS", "TECH", "TEST"],
-            'auto_response_enabled': True,
-            'auto_response_delay': 3.0,
-            'sync_interval_minutes': 15
-        }
-        with open('bbs_config.json', 'w') as f:
-            json.dump(config, f, indent=4)
-        if debug:
-            print("BBS config saved")
-    except Exception as e:
-        if debug:
-            print(f"Error saving BBS config: {str(e)}")
-
 
 def send_mail_menu(destination_id):
     """Send mail menu options."""
@@ -1786,9 +1662,19 @@ def handle_compose_content(destination_id, content_input):
         # Store the mail in the database
         store_mail_in_db(destination_id, recipient_node_id, subject, content_input)
         
-        # Send confirmation
+        # Send confirmation to sender
         success_msg = f"Mail sent to {recipient_node_id}!\nSubject: {subject}\n\nReply [B]ack to return to mail menu."
         send_direct_message(destination_id, success_msg)
+        
+        # Notify recipient that they have new mail
+        def delayed_mail_notification():
+            time.sleep(3.0)  # Longer delay before notifying recipient
+            mail_notification = "✉️ You've got mail!✉️"
+            send_direct_message(recipient_node_id, mail_notification)
+        
+        # Start the mail notification in a separate thread
+        notification_thread = threading.Thread(target=delayed_mail_notification, daemon=True)
+        notification_thread.start()
         
         # Reset state
         update_user_state(destination_id, 'mail_menu')
@@ -1798,7 +1684,7 @@ def handle_compose_content(destination_id, content_input):
         send_direct_message(destination_id, error_msg)
 
 
-def send_inbox(destination_id):
+def send_inbox(destination_id, show_instructions=True):
     """Send inbox contents from database."""
     # Get actual mail from database
     mail_list = get_mail_for_node(destination_id, 'inbox')
@@ -1809,17 +1695,27 @@ def send_inbox(destination_id):
             mail_id, from_node_id, subject, timestamp, is_read = mail
             read_status = "[READ] " if is_read else "[NEW] "
             inbox_text += f"[{i}] {read_status}From {from_node_id}: {subject}\n"
-        inbox_text += "\nReply with mail number to read, or [B]ack to return to mail menu."
     else:
-        inbox_text = "Inbox is empty.\n\nReply [B]ack to return to mail menu."
+        inbox_text = "Inbox is empty."
     
     # Set user state to viewing inbox and submenu to inbox
     update_user_state(destination_id, 'viewing_inbox')
     update_submenu_state(destination_id, 'inbox')
     
-    # Add a small delay to avoid race conditions
-    time.sleep(2.0)
+    # Send inbox contents immediately
     send_direct_message(destination_id, inbox_text)
+    time.sleep(2.0)  # Small delay between messages
+    
+    # Send additional menu message if instructions should be shown, using threaded delay
+    if show_instructions:
+        def delayed_menu_response():
+            time.sleep(2.0)  # Small delay between messages
+            menu_text = "[#] read message or [C]ompose new mail"
+            send_direct_message(destination_id, menu_text)
+        
+        # Start the delayed menu response in a separate thread
+        menu_thread = threading.Thread(target=delayed_menu_response, daemon=True)
+        menu_thread.start()
 
 
 def send_sent_mail(destination_id):
@@ -1979,25 +1875,31 @@ def send_mail_content(destination_id, mail_type, mail_number):
     mail_list = get_mail_for_node(destination_id, mail_type)
     
     if not mail_list or mail_number < 1 or mail_number > len(mail_list):
-        mail_text = f"Mail {mail_number} not found in {mail_type}."
-    else:
-        # Get the mail ID from the list
-        mail_id = mail_list[mail_number - 1][0]  # First column is the mail ID
-        
-        # Get the full mail content
-        mail_data = get_mail_content(mail_id)
-        
-        if mail_data:
-            if mail_type == "inbox":
-                mail_text = f"Mail {mail_number} (Inbox):\nFrom: {mail_data['from_node_id']}\nSubject: {mail_data['subject']}\nTime: {mail_data['timestamp']}\n\n{mail_data['content']}\n\nReply [B]ack to return to inbox."
-            else:  # sent
-                mail_text = f"Mail {mail_number} (Sent):\nTo: {mail_data['to_node_id']}\nSubject: {mail_data['subject']}\nTime: {mail_data['timestamp']}\n\n{mail_data['content']}\n\nReply [B]ack to return to sent mail."
-        else:
-            mail_text = f"Mail {mail_number} content not found."
+        # Invalid mail number - send error message
+        mail_text = f"Invalid choice. Please select a number between 1 and {len(mail_list) if mail_list else 0}."
+        # Don't set viewing_mail state for invalid selections
+        # Add a small delay to avoid race conditions
+        time.sleep(2.0)
+        send_direct_message(destination_id, mail_text)
+        return
     
-    # Set user state to viewing this specific mail
-    update_user_state(destination_id, f'viewing_mail:{mail_type}')
-    update_submenu_state(destination_id, 'viewing_mail')
+    # Get the mail ID from the list
+    mail_id = mail_list[mail_number - 1][0]  # First column is the mail ID
+    
+    # Get the full mail content
+    mail_data = get_mail_content(mail_id)
+    
+    if mail_data:
+        if mail_type == "inbox":
+            mail_text = f"Mail {mail_number} (Inbox):\nFrom: {mail_data['from_node_id']}\nSubject: {mail_data['subject']}\nTime: {mail_data['timestamp']}\n\n{mail_data['content']}\n\n[R]eply [D]elete or [B]ack to inbox"
+        else:  # sent
+            mail_text = f"Mail {mail_number} (Sent):\nTo: {mail_data['to_node_id']}\nSubject: {mail_data['subject']}\nTime: {mail_data['timestamp']}\n\n{mail_data['content']}\n\nReply [B]ack to return to sent mail or [D]elete to delete this message."
+        
+        # Set user state to viewing this specific mail (only for valid mail)
+        update_user_state(destination_id, f'viewing_mail:{mail_type}:{mail_id}')
+        update_submenu_state(destination_id, 'viewing_mail')
+    else:
+        mail_text = f"Mail {mail_number} content not found."
     
     # Add a small delay to avoid race conditions
     time.sleep(2.0)
@@ -2185,74 +2087,6 @@ def delete_mail(mail_id):
                 
     except sqlite3.Error as e:
         print(f"SQLite error in delete_mail: {e}")
-    finally:
-        db_connection.close()
-
-
-def create_sample_mail():
-    """Create sample mail for testing the system."""
-    try:
-        # Add some sample mail messages
-        sample_messages = [
-            (node_number, "Welcome to DMV Mesh", "Welcome to the DMV Mesh network! This is a community-driven mesh network serving the DMV area. Feel free to introduce yourself and explore the available features."),
-            (node_number, "System Information", "Your node is now connected to the mesh network. You can send and receive mail, browse bulletins, and use various utilities."),
-            (node_number, "Getting Started", "To get started, try sending mail to other nodes using their node ID in the format !12345678. You can also browse the bulletin boards for community information.")
-        ]
-        
-        # Add mail to a test recipient (assuming node 12345678 exists)
-        test_recipient = 12345678
-        
-        for from_node, subject, content in sample_messages:
-            store_mail_in_db(from_node, test_recipient, subject, content)
-        
-        if debug:
-            print(f"Created {len(sample_messages)} sample mail messages for testing")
-            
-    except Exception as e:
-        if debug:
-            print(f"Error creating sample mail: {str(e)}")
-
-
-def send_test_mail(target_id):
-    """Send a test mail message to a specific node."""
-    try:
-        subject = f"Test Mail from {node_number}"
-        content = f"This is a test mail message sent at {current_time()}. Your mail system is working correctly!"
-        
-        store_mail_in_db(node_number, target_id, subject, content)
-        
-        if debug:
-            print(f"Test mail sent to node {target_id}")
-            
-        # Send confirmation
-        confirmation = f"Test mail sent to {target_id}!\nSubject: {subject}\n\nReply [M]ail to check your sent mail."
-        send_direct_message(node_number, confirmation)
-        
-    except Exception as e:
-        if debug:
-            print(f"Error sending test mail: {str(e)}")
-
-
-def store_bulletin_board(name, description=""):
-    """Store a new bulletin board in the database."""
-    try:
-        bulletin_table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_bulletin_boards"
-        
-        with sqlite3.connect(db_file_path) as db_connection:
-            db_cursor = db_connection.cursor()
-            
-            timestamp = current_time()
-            db_cursor.execute(f'''INSERT INTO {bulletin_table_name} 
-                                (name, description, created_at, is_active)
-                                VALUES (?, ?, ?, 1)''',
-                            (name, description, timestamp))
-            
-            db_connection.commit()
-            if debug:
-                print(f"Bulletin board stored: {name}")
-                
-    except sqlite3.Error as e:
-        print(f"SQLite error in store_bulletin_board: {e}")
     finally:
         db_connection.close()
 
@@ -2512,7 +2346,6 @@ def erase_nodedb():
             update_gui(f"{format_time(current_time())} >>> Node database for channel {channel} erased successfully.", tag="info")
     else:
         update_gui(f"{format_time(current_time())} >>> Node database erase for channel {channel} cancelled.", tag="info")
-
 
 
 def erase_messagedb():
@@ -2828,14 +2661,6 @@ if not is_valid_hex(node_name, 8, 8):
 
 global_message_id = random.getrandbits(32)
 
-# Node number is already set from config.ini - no need to convert again
-
-# Configuration loaded from config.ini - no presets needed
-
-# Initialize BBS configuration
-load_bbs_config()
-
-
 ############################
 # GUI Layout
 
@@ -3026,9 +2851,6 @@ test_broadcast_button.grid(row=5, column=2, padx=5, pady=1, sticky=tk.EW)
 test_direct_button = tk.Button(button_frame, text="Test Direct", command=lambda: send_test_direct_message(3007869591))
 test_direct_button.grid(row=6, column=2, padx=5, pady=1, sticky=tk.EW)
 
-test_bbs_button = tk.Button(button_frame, text="Test BBS", command=send_test_bbs_message)
-test_bbs_button.grid(row=7, column=2, padx=5, pady=1, sticky=tk.EW)
-
 ### INTERFACE WINDOW
 message_history = scrolledtext.ScrolledText(message_log_frame, wrap=tk.WORD)
 message_history.grid(row=11, column=0, columnspan=3, padx=5, pady=10, sticky=tk.NSEW)
@@ -3103,7 +2925,44 @@ node_info_timer.start()
 # Set the exit handler
 root.protocol("WM_DELETE_WINDOW", on_exit)
 
-
-
 # Start the main loop
 root.mainloop()
+
+
+#################################
+# Bulletin Board Functions (Placeholder implementations)
+#################################
+def send_bulletin_boards(destination_id):
+    """Send bulletin board list."""
+    boards_text = """Bulletin Boards:\n[1] GENERAL\n[2] ANNOUNCEMENTS\n[3] TECH\n[4] TEST\n\nReply with board number to view posts."""
+    update_global_state(destination_id, 'bulletin')
+    update_submenu_state(destination_id, 'boards')
+    update_user_state(destination_id, None)
+    time.sleep(2.0)
+    send_direct_message(destination_id, boards_text)
+
+def send_board_posts(destination_id, board_number):
+    """Send posts for a specific board."""
+    boards = ["GENERAL", "ANNOUNCEMENTS", "TECH", "TEST"]
+    if 1 <= board_number <= len(boards):
+        board_name = boards[board_number - 1]
+        posts_text = f"Posts in {board_name}:\n\n[1] Sample Post 1\n[2] Sample Post 2\n[3] Sample Post 3\n\nReply with post number to read, or [B]ack to return to boards."
+        update_submenu_state(destination_id, 'posts')
+        update_user_state(destination_id, f'viewing_board:{board_name}')
+        time.sleep(2.0)
+        send_direct_message(destination_id, posts_text)
+    else:
+        error_text = "Invalid board number.\n\nReply [B]ack to return to boards."
+        send_direct_message(destination_id, error_text)
+
+def send_post_content(destination_id, board_name, post_number):
+    """Send content of a specific post."""
+    if 1 <= post_number <= 3:
+        post_text = f"Post {post_number} in {board_name}:\n\nThis is sample content for post {post_number} in the {board_name} board.\n\nReply [B]ack to return to posts."
+        update_submenu_state(destination_id, 'viewing_post')
+        update_user_state(destination_id, f'viewing_post:{board_name}:{post_number}')
+        time.sleep(2.0)
+        send_direct_message(destination_id, post_text)
+    else:
+        error_text = "Invalid post number.\n\nReply [B]ack to return to posts."
+        send_direct_message(destination_id, error_text)
