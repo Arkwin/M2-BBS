@@ -28,9 +28,6 @@ import configparser
 from datetime import datetime
 from time import mktime
 from typing import Optional
-import tkinter as tk
-from tkinter import scrolledtext, simpledialog, messagebox
-import tkinter.messagebox
 import base64
 import json
 import re
@@ -50,6 +47,9 @@ user_states = {}
 # Global state tracking
 global_states = {}  # Main system: 'mail', 'main_menu', or None
 submenu_states = {}  # Submenu within system: 'boards', 'posts', 'inbox', 'sent', etc.
+
+# Node-Topic tracking
+node_topic_map = {}  # Track which topic each node was last seen on
 
 def update_user_state(user_id, state):
     """Update user state for BBS operations."""
@@ -98,13 +98,30 @@ def clear_user_states(user_id):
     if debug:
         print(f"Cleared all states for user {user_id}")
 
+def update_node_topic(node_id, topic):
+    """Update which topic a node was last seen on."""
+    node_topic_map[node_id] = topic
+    if debug:
+        print(f"Updated node {node_id} last seen topic to: {topic}")
+
+def get_node_topic(node_id):
+    """Get the topic where a node was last seen."""
+    topic = node_topic_map.get(node_id, None)
+    if debug:
+        print(f"Node {node_id} last seen on topic: {topic}")
+        if topic is None:
+            print(f"Current node_topic_map contains {len(node_topic_map)} entries:")
+            for tracked_node, tracked_topic in node_topic_map.items():
+                print(f"  Node {tracked_node}: {tracked_topic}")
+    return topic
+
 #################################
 ### Configuration Loading
 #################################
 
 def load_config():
     """Load configuration from config.ini file."""
-    global mqtt_broker, mqtt_port, mqtt_username, mqtt_password, root_topic, channel, key
+    global mqtt_broker, mqtt_port, mqtt_username, mqtt_password, root_topic, root_topics, channel, key
     global node_number, client_long_name, client_short_name, lat, lon, alt
     global bbs_enabled, bbs_nodes, debug, auto_reconnect, auto_reconnect_delay
     global print_service_envelope, print_message_packet, print_text_message, print_node_info
@@ -122,7 +139,12 @@ def load_config():
         mqtt_port = config.getint('DEFAULT', 'mqtt_port', fallback=1883)
         mqtt_username = config.get('DEFAULT', 'mqtt_username', fallback='meshdev')
         mqtt_password = config.get('DEFAULT', 'mqtt_password', fallback='large4cats')
-        root_topic = config.get('DEFAULT', 'root_topic', fallback='msh/US/2/e/')
+        root_topic_config = config.get('DEFAULT', 'root_topic', fallback='msh/US/2/e/')
+        
+        # Parse comma-separated root topics
+        root_topics = [topic.strip() for topic in root_topic_config.split(',') if topic.strip()]
+        root_topic = root_topics[0] if root_topics else 'msh/US/2/e/'  # Use first topic as primary
+        
         channel = config.get('DEFAULT', 'channel', fallback='LongFast')
         key = config.get('DEFAULT', 'key', fallback='AQ==')
         
@@ -177,6 +199,7 @@ def load_config():
         mqtt_port = 1883
         mqtt_username = "meshdev"
         mqtt_password = "large4cats"
+        root_topics = ["msh/US/2/e/"]
         root_topic = "msh/US/2/e/"
         channel = "LongFast"
         key = "AQ=="
@@ -217,7 +240,7 @@ def save_config():
         'mqtt_port': str(mqtt_port),
         'mqtt_username': mqtt_username,
         'mqtt_password': mqtt_password,
-        'root_topic': root_topic,
+        'root_topic': ','.join(root_topics),
         'channel': channel,
         'key': key,
         
@@ -306,13 +329,21 @@ def is_valid_hex(test_value: str, minchars: Optional[int], maxchars: int) -> boo
     return valid_hex_return
 
 def set_topic():
-    """Set the MQTT topic for subscribing and publishing."""
+    """Set the MQTT topics for subscribing and publishing."""
     if debug:
         print("set_topic")
-    global subscribe_topic, publish_topic, node_number, node_name
+    global subscribe_topics, publish_topic, node_number, node_name, root_topics
     node_name = '!' + hex(node_number)[2:]
-    subscribe_topic = root_topic + channel + "/#"
-    publish_topic = root_topic + channel + "/" + node_name
+    
+    # Create subscription topics for all root topics
+    subscribe_topics = [topic + channel + "/#" for topic in root_topics]
+    
+    # Use the first root topic for publishing
+    publish_topic = root_topics[0] + channel + "/" + node_name
+    
+    if debug:
+        print(f"Subscribe topics: {subscribe_topics}")
+        print(f"Publish topic: {publish_topic}")
 
 def current_time() -> str:
     """Return the current time (as an integer number of seconds since the epoch) as a string."""
@@ -416,6 +447,9 @@ def on_message(client, userdata, msg):					# pylint: disable=unused-argument
 # Handle Presets
     """Callback function that accepts a meshtastic message from mqtt."""
 
+    # Extract the topic to track node locations
+    message_topic = msg.topic
+    
     # if debug:
     #     print("on_message")
     se = mqtt_pb2.ServiceEnvelope()
@@ -446,6 +480,10 @@ def on_message(client, userdata, msg):					# pylint: disable=unused-argument
         print ("Message Packet:")
         print(mp)
 
+    # Track which topic this node was seen on (do this early for all message types)
+    from_node = getattr(mp, "from")
+    update_node_topic(from_node, message_topic)
+    
     if mp.decoded.portnum == portnums_pb2.TEXT_MESSAGE_APP:
         try:
             text_payload = mp.decoded.payload.decode("utf-8")
@@ -565,8 +603,8 @@ def on_message(client, userdata, msg):					# pylint: disable=unused-argument
                 message = f"{format_time(current_time())} >>> Route: {final_route}"
 
                 # Only display traceroutes originating from yourself
-                if getattr(mp, 'to') == int(node_number_entry.get()):
-                    update_gui(message, tag="info")
+                if getattr(mp, 'to') == int(node_number):
+                    update_console(message, tag="info")
 
             except AttributeError as e:
                 print(f"Error accessing route: {e}")
@@ -635,26 +673,24 @@ def process_message(mp, text_payload, is_encrypted):
         if to_node == node_number:
             if debug:
                 print("This is a direct message to me!")
+                print(f"Processing DM from {from_node}: '{text_payload}'")
+                print(f"Current states - Global: {get_global_state(from_node)}, Submenu: {get_submenu_state(from_node)}, User: {get_user_state(from_node)}")
+                if text_payload.strip().isdigit():
+                    print(f"Text payload is digit: {text_payload.strip().isdigit()}")
+                    print(f"Digit value: {int(text_payload.strip())}")
+                    print(f"Digit >= 1: {int(text_payload.strip()) >= 1}")
+                    print(f"Global state == 'mail': {get_global_state(from_node) == 'mail'}")
+                    print(f"Submenu state check: {get_submenu_state(from_node) in ['inbox', 'sent', 'viewing_inbox']}")
             display_str = f"{format_time(current_time())} DM from {sender_short_name}: {text_payload}"
             if display_dm_emoji:
                 display_str = display_str[:9] + dm_emoji + display_str[9:]
             if want_ack is True:
                 send_ack(from_node, message_id)
             
-            # Check if this is a main menu selection (M, menu, help, etc.)
-            if text_payload.strip().upper() in ['M', 'MENU', 'HELP']:
-                should_send_auto_response = False
-                if debug:
-                    print(f"Main menu selection detected: {text_payload}")
-                # Handle menu selection in a separate thread with a small delay
-                def delayed_menu_response():
-                    time.sleep(1.0)  # Wait 1 second
-                    handle_menu_selection(from_node, text_payload)
-                
-                menu_thread = threading.Thread(target=delayed_menu_response, daemon=True)
-                menu_thread.start()
+            should_send_auto_response = True  # Default to sending auto-response
+            
             # Check if this is a mail menu selection when in mail system and at mail menu
-            elif len(text_payload.strip()) == 1 and text_payload.strip().upper() in ['C', 'I', 'S', 'D'] and get_global_state(from_node) == 'mail' and get_submenu_state(from_node) == 'mail_menu':
+            if len(text_payload.strip()) == 1 and text_payload.strip().upper() in ['C', 'I', 'S', 'D'] and get_global_state(from_node) == 'mail' and get_submenu_state(from_node) == 'mail_menu':
                 should_send_auto_response = False
                 if debug:
                     print(f"Mail menu selection detected: {text_payload}")
@@ -678,13 +714,14 @@ def process_message(mp, text_payload, is_encrypted):
                 compose_from_inbox_thread = threading.Thread(target=delayed_compose_from_inbox_response, daemon=True)
                 compose_from_inbox_thread.start()
             # Check if this is a mail number selection when viewing inbox or sent mail in mail system
-            elif text_payload.strip().isdigit() and 1 <= int(text_payload.strip()) <= 3 and get_global_state(from_node) == 'mail' and (get_submenu_state(from_node) == 'inbox' or get_submenu_state(from_node) == 'sent' or get_submenu_state(from_node) == 'viewing_inbox'):
+            elif text_payload.strip().isdigit() and int(text_payload.strip()) >= 1 and get_global_state(from_node) == 'mail' and (get_submenu_state(from_node) == 'inbox' or get_submenu_state(from_node) == 'sent' or get_submenu_state(from_node) == 'viewing_inbox'):
                 should_send_auto_response = False
                 mail_number = int(text_payload.strip())
                 if debug:
                     print(f"Mail selection detected: {mail_number}")
                     print(f"Global state: {get_global_state(from_node)}")
                     print(f"Submenu state: {get_submenu_state(from_node)}")
+                    print(f"User state: {get_user_state(from_node)}")
                 # Handle mail selection in a separate thread with a small delay
                 def delayed_mail_content_response():
                     time.sleep(1.0)  # Wait 1 second
@@ -819,7 +856,7 @@ def process_message(mp, text_payload, is_encrypted):
                 compose_thread = threading.Thread(target=delayed_compose_response, daemon=True)
                 compose_thread.start()
             # Check if this is a mail number selection when deleting from inbox or sent mail
-            elif text_payload.strip().isdigit() and 1 <= int(text_payload.strip()) <= 3 and get_global_state(from_node) == 'mail' and (get_submenu_state(from_node) == 'delete_inbox' or get_submenu_state(from_node) == 'delete_sent'):
+            elif text_payload.strip().isdigit() and int(text_payload.strip()) >= 1 and get_global_state(from_node) == 'mail' and (get_submenu_state(from_node) == 'delete_inbox' or get_submenu_state(from_node) == 'delete_sent'):
                 should_send_auto_response = False
                 mail_number = int(text_payload.strip())
                 if debug:
@@ -932,6 +969,19 @@ def process_message(mp, text_payload, is_encrypted):
                     print(f"User state: {get_user_state(from_node)}")
                     print(f"Text payload: '{text_payload}'")
 
+            # Send auto-response after message is fully processed (only for direct messages)
+            if should_send_auto_response:
+                if debug:
+                    print(f"Message processing complete, now sending welcome menu to {from_node}")
+                # Send welcome menu in a separate thread with a small delay
+                def delayed_auto_response():
+                    time.sleep(3.0)  # Wait 3 seconds
+                    # Use the exact same function that works for test direct messages
+                    send_auto_response_via_test_function(from_node)
+                
+                response_thread = threading.Thread(target=delayed_auto_response, daemon=True)
+                response_thread.start()
+
         elif from_node == node_number and to_node != BROADCAST_NUM:
             display_str = f"{format_time(current_time())} DM to {receiver_short_name}: {text_payload}"
 
@@ -955,22 +1005,9 @@ def process_message(mp, text_payload, is_encrypted):
         else:
             color="unencrypted"
         if not private_dm:
-            update_gui(display_str, text_widget=message_history, tag=color)
+            update_console(display_str, tag=color)
         m_id = getattr(mp, "id")
         insert_message_to_db(current_time(), sender_short_name, text_payload, m_id, is_encrypted)
-
-        # Send auto-response after message is fully processed
-        if should_send_auto_response:
-            if debug:
-                print(f"Message processing complete, now sending welcome menu to {from_node}")
-            # Send welcome menu in a separate thread with a small delay
-            def delayed_auto_response():
-                time.sleep(3.0)  # Wait 3 seconds
-                # Use the exact same function that works for test direct messages
-                send_auto_response_via_test_function(from_node)
-            
-            response_thread = threading.Thread(target=delayed_auto_response, daemon=True)
-            response_thread.start()
 
         text = {
             "message": text_payload,
@@ -1037,16 +1074,7 @@ def publish_message(destination_id):
     if not client.is_connected():
         connect_mqtt()
 
-    message_text = message_entry.get()
-    if message_text:
-        encoded_message = mesh_pb2.Data()
-        encoded_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
-        encoded_message.payload = message_text.encode("utf-8")
-        encoded_message.bitfield = 1
-        generate_mesh_packet(destination_id, encoded_message)
-        message_entry.delete(0, 'end')
-    #else:
-    #    return
+    print("publish_message: GUI removed - function disabled")
 
 
 def send_traceroute(destination_id):
@@ -1057,10 +1085,10 @@ def send_traceroute(destination_id):
 
     if not client.is_connected():
         message =  format_time(current_time()) + " >>> Connect to a broker before sending traceroute"
-        update_gui(message, tag="info")
+        update_console(message, tag="info")
     else:
         message =  format_time(current_time()) + " >>> Sending Traceroute Packet"
-        update_gui(message, tag="info")
+        update_console(message, tag="info")
 
         if debug:
             print(f"Sending Traceroute Packet to {str(destination_id)}")
@@ -1083,23 +1111,22 @@ def send_node_info(destination_id, want_response):
 
     if not client.is_connected():
         message =  format_time(current_time()) + " >>> Connect to a broker before sending nodeinfo"
-        update_gui(message, tag="info")
+        update_console(message, tag="info")
     else:
         if not move_text_up(): # copy ID to Number and test for 8 bit hex
             return
         
         if destination_id == BROADCAST_NUM:
             message =  format_time(current_time()) + " >>> Broadcast NodeInfo Packet"
-            update_gui(message, tag="info")
+            update_console(message, tag="info")
         else:
             if debug:
                 print(f"Sending NodeInfo Packet to {str(destination_id)}")
 
-        node_number = int(node_number_entry.get())
-
+        # Use config values instead of GUI entries
         decoded_client_id = bytes(node_name, "utf-8")
-        decoded_client_long = bytes(long_name_entry.get(), "utf-8")
-        decoded_client_short = bytes(short_name_entry.get(), "utf-8")
+        decoded_client_long = bytes(client_long_name, "utf-8")
+        decoded_client_short = bytes(client_short_name, "utf-8")
         decoded_client_hw_model = client_hw_model
 
         user_payload = mesh_pb2.User()
@@ -1130,20 +1157,18 @@ def send_position(destination_id) -> None:
 
     if not client.is_connected():
         message =  format_time(current_time()) + " >>> Connect to a broker before sending position"
-        update_gui(message, tag="info")
+        update_console(message, tag="info")
     else:
         if destination_id == BROADCAST_NUM:
             message =  format_time(current_time()) + " >>> Broadcast Position Packet"
-            update_gui(message, tag="info")
+            update_console(message, tag="info")
         else:
             if debug:
                 print(f"Sending Position Packet to {str(destination_id)}")
 
-        node_number = int(node_number_entry.get())
-        pos_time = int(time.time())
-
-        latitude_str = lat_entry.get()
-        longitude_str = lon_entry.get()
+        # Use config values instead of GUI entries
+        latitude_str = lat
+        longitude_str = lon
 
         try:
             latitude = float(latitude_str)  # Convert latitude to a float
@@ -1160,10 +1185,13 @@ def send_position(destination_id) -> None:
         latitude_i = int(latitude)
         longitude_i = int(longitude)
 
-        altitude_str = alt_entry.get()
+        # Use config value instead of GUI entry
+        altitude_str = alt
         altitude_units = 1 / 3.28084 if 'ft' in altitude_str else 1.0
-        altitude_number_of_units = float(re.sub('[^0-9.]','', altitude_str))
+        altitude_number_of_units = float(re.sub('[^0-9.]','', altitude_str)) if altitude_str else 0.0
         altitude_i = int(altitude_units * altitude_number_of_units) # meters
+        
+        pos_time = int(time.time())
 
         position_payload = mesh_pb2.Position()
         setattr(position_payload, "latitude_i", latitude_i)
@@ -1229,19 +1257,40 @@ def generate_mesh_packet(destination_id, encoded_message):
     payload = service_envelope.SerializeToString()
     set_topic()
     
-    if debug:
-        print(f"Publishing to topic: {publish_topic}")
-        print(f"Payload size: {len(payload)} bytes")
-    
-    # print(payload)
-    result = client.publish(publish_topic, payload)
-    
-    if debug:
-        print(f"MQTT publish result: {result.rc}")
-        if result.rc == 0:
-            print("MQTT publish successful")
-        else:
-            print(f"MQTT publish failed with code: {result.rc}")
+    # For broadcast messages (like node info), publish to ALL topics
+    if destination_id == BROADCAST_NUM:
+        if debug:
+            print(f"Broadcasting to all topics")
+            print(f"Payload size: {len(payload)} bytes")
+        
+        # Publish to all root topics
+        for i, root_topic in enumerate(root_topics):
+            broadcast_topic = root_topic + channel + "/" + node_name
+            if debug:
+                print(f"Publishing to topic {i+1}/{len(root_topics)}: {broadcast_topic}")
+            
+            result = client.publish(broadcast_topic, payload)
+            
+            if debug:
+                print(f"MQTT publish result for {broadcast_topic}: {result.rc}")
+                if result.rc == 0:
+                    print(f"MQTT publish successful to {broadcast_topic}")
+                else:
+                    print(f"MQTT publish failed to {broadcast_topic} with code: {result.rc}")
+    else:
+        # For direct messages, use the primary topic
+        if debug:
+            print(f"Publishing to primary topic: {publish_topic}")
+            print(f"Payload size: {len(payload)} bytes")
+        
+        result = client.publish(publish_topic, payload)
+        
+        if debug:
+            print(f"MQTT publish result: {result.rc}")
+            if result.rc == 0:
+                print("MQTT publish successful")
+            else:
+                print(f"MQTT publish failed with code: {result.rc}")
 
 
 def encrypt_message(channel, key, mesh_packet, encoded_message):
@@ -1266,6 +1315,138 @@ def encrypt_message(channel, key, mesh_packet, encoded_message):
     encrypted_bytes = encryptor.update(encoded_message.SerializeToString()) + encryptor.finalize()
 
     return encrypted_bytes
+
+
+def generate_targeted_mail_notification_packet(destination_id, encoded_message, target_topic):
+    """Send a mail notification packet to a specific topic where the node was last seen."""
+    global global_message_id
+    
+    if debug:
+        print(f"Generating targeted mail notification packet for destination {destination_id} on topic {target_topic}")
+    
+    # Create the base mesh packet
+    mesh_packet = mesh_pb2.MeshPacket()
+    mesh_packet.id = global_message_id
+    global_message_id += 1
+
+    setattr(mesh_packet, "from", node_number)
+    mesh_packet.to = destination_id
+    mesh_packet.want_ack = True  # Request acknowledgment for mail notifications
+    mesh_packet.channel = generate_hash(channel, key)
+    
+    # Use more hops for mail notifications to ensure delivery
+    mesh_packet.hop_limit = 3
+    mesh_packet.hop_start = 3
+
+    if debug:
+        print(f"Targeted mail notification packet: from={node_number}, to={destination_id}, id={mesh_packet.id}, hops={mesh_packet.hop_limit}")
+
+    # Encrypt the message
+    if key == "":
+        mesh_packet.decoded.CopyFrom(encoded_message)
+        if debug:
+            print("key is none")
+    else:
+        mesh_packet.encrypted = encrypt_message(channel, key, mesh_packet, encoded_message)
+        if debug:
+            print("key present")
+
+    # Create service envelope
+    service_envelope = mqtt_pb2.ServiceEnvelope()
+    service_envelope.packet.CopyFrom(mesh_packet)
+    service_envelope.channel_id = channel
+    service_envelope.gateway_id = node_name
+
+    payload = service_envelope.SerializeToString()
+    
+    if debug:
+        print(f"Targeted mail notification - Sending to specific topic: {target_topic}")
+        print(f"Payload size: {len(payload)} bytes")
+    
+    # Extract the root topic from the target topic (remove the channel/node part)
+    # target_topic format: "msh/US/DMV/2/e/LongFast/!abcdb5df"
+    # We need to extract "msh/US/DMV/2/e/" part
+    topic_parts = target_topic.split('/')
+    if len(topic_parts) >= 6:
+        root_topic_part = '/'.join(topic_parts[:5]) + '/'
+        notification_topic = root_topic_part + channel + "/" + node_name
+    else:
+        # Fallback: use the primary root topic
+        notification_topic = root_topic + channel + "/" + node_name
+    
+    if debug:
+        print(f"Publishing targeted mail notification to: {notification_topic}")
+    
+    result = client.publish(notification_topic, payload)
+    
+    if debug:
+        print(f"MQTT publish result for {notification_topic}: {result.rc}")
+        if result.rc == 0:
+            print(f"Targeted mail notification published successfully to {notification_topic}")
+        else:
+            print(f"Targeted mail notification failed to {notification_topic} with code: {result.rc}")
+
+
+def generate_mail_notification_packet(destination_id, encoded_message):
+    """Send a mail notification packet to ALL topics to ensure delivery across regions."""
+    global global_message_id
+    
+    if debug:
+        print(f"Generating mail notification packet for destination {destination_id}")
+    
+    # Create the base mesh packet
+    mesh_packet = mesh_pb2.MeshPacket()
+    mesh_packet.id = global_message_id
+    global_message_id += 1
+
+    setattr(mesh_packet, "from", node_number)
+    mesh_packet.to = destination_id
+    mesh_packet.want_ack = True  # Request acknowledgment for mail notifications
+    mesh_packet.channel = generate_hash(channel, key)
+    
+    # Use more hops for mail notifications to ensure delivery
+    mesh_packet.hop_limit = 3
+    mesh_packet.hop_start = 3
+
+    if debug:
+        print(f"Mail notification packet: from={node_number}, to={destination_id}, id={mesh_packet.id}, hops={mesh_packet.hop_limit}")
+
+    # Encrypt the message
+    if key == "":
+        mesh_packet.decoded.CopyFrom(encoded_message)
+        if debug:
+            print("key is none")
+    else:
+        mesh_packet.encrypted = encrypt_message(channel, key, mesh_packet, encoded_message)
+        if debug:
+            print("key present")
+
+    # Create service envelope
+    service_envelope = mqtt_pb2.ServiceEnvelope()
+    service_envelope.packet.CopyFrom(mesh_packet)
+    service_envelope.channel_id = channel
+    service_envelope.gateway_id = node_name
+
+    payload = service_envelope.SerializeToString()
+    
+    if debug:
+        print(f"Mail notification - Broadcasting to all topics")
+        print(f"Payload size: {len(payload)} bytes")
+    
+    # Publish to ALL root topics to ensure delivery regardless of recipient's region
+    for i, root_topic in enumerate(root_topics):
+        notification_topic = root_topic + channel + "/" + node_name
+        if debug:
+            print(f"Publishing mail notification to topic {i+1}/{len(root_topics)}: {notification_topic}")
+        
+        result = client.publish(notification_topic, payload)
+        
+        if debug:
+            print(f"MQTT publish result for {notification_topic}: {result.rc}")
+            if result.rc == 0:
+                print(f"Mail notification published successfully to {notification_topic}")
+            else:
+                print(f"Mail notification failed to {notification_topic} with code: {result.rc}")
 
 
 def send_ack(destination_id, message_id):
@@ -1294,7 +1475,7 @@ def send_auto_response(destination_id):
     if not client.is_connected():
         if debug:
             print("Not connected to MQTT broker, skipping welcome menu")
-        update_gui(f"{format_time(current_time())} >>> Welcome menu skipped - not connected to MQTT broker", tag="info")
+        update_console(f"{format_time(current_time())} >>> Welcome menu skipped - not connected to MQTT broker", tag="info")
         return
 
     # Create the welcome menu message
@@ -1325,7 +1506,7 @@ def send_auto_response(destination_id):
         generate_mesh_packet(destination_id, encoded_message)
         
         # Add GUI feedback
-        update_gui(f"{format_time(current_time())} >>> Welcome menu sent to {get_name_by_id('short', destination_id)}", tag="info")
+        update_console(f"{format_time(current_time())} >>> Welcome menu sent to {get_name_by_id('short', destination_id)}", tag="info")
         
         if debug:
             print(f"Welcome menu successfully sent to {destination_id}")
@@ -1334,7 +1515,7 @@ def send_auto_response(destination_id):
     except Exception as e:
         error_msg = f"Error sending welcome menu: {str(e)}"
         print(error_msg)
-        update_gui(f"{format_time(current_time())} >>> {error_msg}", tag="info")
+        update_console(f"{format_time(current_time())} >>> {error_msg}", tag="info")
         if debug:
             print("=== WELCOME MENU ERROR ===")
 
@@ -1353,9 +1534,7 @@ def send_simple_ack(destination_id):
         # Send a very simple message
         simple_text = "ok"
         
-        global node_number
-        node_number = int(node_number_entry.get())
-        
+        # Use global node_number from config instead of GUI
         encoded_message = mesh_pb2.Data()
         encoded_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
         encoded_message.payload = simple_text.encode("utf-8")
@@ -1387,9 +1566,7 @@ def send_test_broadcast():
         # Send a test broadcast message
         test_text = "test broadcast"
         
-        global node_number
-        node_number = int(node_number_entry.get())
-        
+        # Use global node_number from config instead of GUI
         encoded_message = mesh_pb2.Data()
         encoded_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
         encoded_message.payload = test_text.encode("utf-8")
@@ -1421,9 +1598,7 @@ def send_test_direct_message(target_id):
         # Send a test direct message
         test_text = f"Test direct message at {format_time(current_time())}"
         
-        global node_number
-        node_number = int(node_number_entry.get())
-        
+        # Use global node_number from config instead of GUI
         encoded_message = mesh_pb2.Data()
         encoded_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
         encoded_message.payload = test_text.encode("utf-8")
@@ -1455,9 +1630,7 @@ def send_auto_response_via_test_function(target_id):
         # Send welcome menu message
         welcome_text = "✉️Welcome to Mesh Mail!✉️"
         
-        global node_number
-        node_number = int(node_number_entry.get())
-        
+        # Use global node_number from config instead of GUI
         encoded_message = mesh_pb2.Data()
         encoded_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
         encoded_message.payload = welcome_text.encode("utf-8")
@@ -1516,9 +1689,7 @@ def send_direct_message(destination_id, message):
         return
 
     try:
-        global node_number
-        node_number = int(node_number_entry.get())
-        
+        # Use global node_number from config instead of GUI entry
         encoded_message = mesh_pb2.Data()
         encoded_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
         encoded_message.payload = message.encode("utf-8")
@@ -1536,24 +1707,44 @@ def send_direct_message(destination_id, message):
         print(f"Error sending direct message: {str(e)}")
 
 
-def handle_menu_selection(destination_id, selection):
-    """Handle user menu selection from direct message."""
-    selection = selection.strip().upper()
-    
-    if debug:
-        print(f"Handling menu selection '{selection}' from {destination_id}")
-    
-    if selection == 'M':
-        send_mail_menu(destination_id)
-    else:
-        # Invalid selection - send help
-        help_text = """Invalid selection. Available options:
-[M]ail
+def send_mail_notification(destination_id, message):
+    """Send a mail notification to a specific node via the topic they were last seen on."""
+    if not client.is_connected():
+        if debug:
+            print("Not connected to MQTT broker, skipping mail notification")
+        return
 
-Reply with option letter."""
-        # Add a small delay to avoid race conditions
-        time.sleep(2.0)
-        send_direct_message(destination_id, help_text)
+    try:
+        # Create the text message
+        encoded_message = mesh_pb2.Data()
+        encoded_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
+        encoded_message.payload = message.encode("utf-8")
+        encoded_message.bitfield = 1
+        
+        # Get the topic where this node was last seen
+        node_topic = get_node_topic(destination_id)
+        
+        if node_topic:
+            if debug:
+                print(f"Sending mail notification to {destination_id} via specific topic: {node_topic}")
+            
+            # Generate mail notification packet for the specific topic
+            generate_targeted_mail_notification_packet(destination_id, encoded_message, node_topic)
+            
+            if debug:
+                print(f"Mail notification sent to {destination_id} via topic: {node_topic}")
+        else:
+            if debug:
+                print(f"No topic found for node {destination_id}, broadcasting to all topics as fallback")
+            
+            # Fallback to broadcasting to all topics
+            generate_mail_notification_packet(destination_id, encoded_message)
+            
+            if debug:
+                print(f"Mail notification sent to {destination_id} via all topics (fallback)")
+            
+    except Exception as e:
+        print(f"Error sending mail notification: {str(e)}")
 
 
 def handle_mail_selection(destination_id, selection):
@@ -1605,11 +1796,26 @@ def handle_compose_mail(destination_id, recipient_input):
     # Add delay to prevent race conditions
     time.sleep(2.0)
     
+    # Strip whitespace from input
+    recipient_input = recipient_input.strip()
+    
+    if debug:
+        print(f"handle_compose_mail: recipient_input='{recipient_input}', type={type(recipient_input)}, length={len(recipient_input)}")
+        print(f"recipient_input repr: {repr(recipient_input)}")
+        print(f"startswith '!': {recipient_input.startswith('!')}")
+    
     # Check if this looks like a node ID
     if recipient_input.startswith('!'):
         try:
+            hex_part = recipient_input[1:]
+            if debug:
+                print(f"Extracting hex part: '{hex_part}'")
+            
             # Extract node ID from !12345678 format
-            recipient_node_id = int(recipient_input[1:], 16)
+            recipient_node_id = int(hex_part, 16)
+            
+            if debug:
+                print(f"Successfully converted to decimal: {recipient_node_id}")
             
             # Store the recipient for the next step
             update_user_state(destination_id, f'composing_to:{recipient_node_id}')
@@ -1618,10 +1824,14 @@ def handle_compose_mail(destination_id, recipient_input):
             subject_prompt = f"Recipient: {recipient_node_id}\nEnter subject line:"
             send_direct_message(destination_id, subject_prompt)
             
-        except ValueError:
+        except ValueError as e:
+            if debug:
+                print(f"ValueError converting '{recipient_input}': {e}")
             error_msg = "Invalid node ID format. Use !12345678 format.\n\nReply [B]ack to return to mail menu."
             send_direct_message(destination_id, error_msg)
     else:
+        if debug:
+            print(f"Input doesn't start with '!': '{recipient_input}'")
         error_msg = "Invalid node ID format. Use !12345678 format.\n\nReply [B]ack to return to mail menu."
         send_direct_message(destination_id, error_msg)
 
@@ -1668,9 +1878,9 @@ def handle_compose_content(destination_id, content_input):
         
         # Notify recipient that they have new mail
         def delayed_mail_notification():
-            time.sleep(3.0)  # Longer delay before notifying recipient
-            mail_notification = "✉️ You've got mail!✉️"
-            send_direct_message(recipient_node_id, mail_notification)
+            time.sleep(4.0)  # Longer delay before notifying recipient
+            mail_notification = "✉️ You've got mail! ✉️"
+            send_mail_notification(recipient_node_id, mail_notification)
         
         # Start the mail notification in a separate thread
         notification_thread = threading.Thread(target=delayed_mail_notification, daemon=True)
@@ -1703,6 +1913,7 @@ def send_inbox(destination_id, show_instructions=True):
     update_submenu_state(destination_id, 'inbox')
     
     # Send inbox contents immediately
+    time.sleep(2.0)
     send_direct_message(destination_id, inbox_text)
     time.sleep(2.0)  # Small delay between messages
     
@@ -1914,6 +2125,7 @@ def setup_db():
     try:
         table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_messages"
         node_table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_nodes"
+        nodeinfo_table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_nodeinfo"
         mail_table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_mail"
         bulletin_table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_bulletin_boards"
         post_table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_posts"
@@ -1928,6 +2140,10 @@ def setup_db():
             # Create nodes table
             db_cursor.execute(f'''CREATE TABLE IF NOT EXISTS {node_table_name}
                                 (node_id TEXT PRIMARY KEY, long_name TEXT, short_name TEXT, last_seen TEXT)''')
+            
+            # Create nodeinfo table
+            db_cursor.execute(f'''CREATE TABLE IF NOT EXISTS {nodeinfo_table_name}
+                                (user_id TEXT PRIMARY KEY, long_name TEXT, short_name TEXT, hw_model INTEGER)''')
             
             # Create mail table
             db_cursor.execute(f'''CREATE TABLE IF NOT EXISTS {mail_table_name}
@@ -2122,7 +2338,8 @@ def maybe_store_nodeinfo_in_db(info):
 
                 # Display the new record in the nodeinfo_window widget
                 # This inserts add the end, which breaks the sorting we start with. 
-                update_gui(new_node.node_list_disp, text_widget=nodeinfo_window)
+                if debug:
+                    print(f"New node added: {new_node.node_list_disp}")
                 
                 # Deliver mail to new node
                 deliver_mail_to_node(info.id)
@@ -2144,8 +2361,8 @@ def maybe_store_nodeinfo_in_db(info):
 
                     # Display the updated record in the nodeinfo_window widget
                     # This appends the record to the end, which breaks sorting
-                    message = f"{updated_record[0]}, {updated_record[1]}, {updated_record[2]}"
-                    update_gui(message, text_widget=nodeinfo_window)
+                    if debug:
+                        print(f"Node updated: {updated_record[0]}, {updated_record[1]}, {updated_record[2]}")
                     
                     # Deliver mail to returning node
                     deliver_mail_to_node(info.id)
@@ -2267,7 +2484,7 @@ def insert_message_to_db(time, sender_short_name, text_payload, message_id, is_e
 
             # Strip newline characters and insert the message into the messages table
             formatted_message = text_payload.strip()
-            db_cursor.execute(f'INSERT INTO {table_name} (timestamp, sender, content, message_id, is_encrypted) VALUES (?,?,?,?,?)',
+            db_cursor.execute(f'INSERT INTO {table_name} (time, sender_short_name, text_payload, message_id, is_encrypted) VALUES (?,?,?,?,?)',
                               (time, sender_short_name, formatted_message, message_id, is_encrypted))
             db_connection.commit()
 
@@ -2278,40 +2495,7 @@ def insert_message_to_db(time, sender_short_name, text_payload, message_id, is_e
         db_connection.close()
 
 
-def load_message_history_from_db():
-    """Load previously stored messages from sqlite and display them."""
 
-    if debug:
-        print("load_message_history_from_db")
-
-    table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_messages"
-
-    try:
-        with sqlite3.connect(db_file_path) as db_connection:
-            db_cursor = db_connection.cursor()
-
-            # Fetch all messages from the database
-            messages = db_cursor.execute(f'SELECT timestamp, sender, content, is_encrypted FROM {table_name}').fetchall()
-
-            message_history.config(state=tk.NORMAL)
-            message_history.delete('1.0', tk.END)
-
-            # Display each message in the message_history widget
-            for message in messages:
-                timestamp = format_time(message[0])
-                if message[3] == 1:
-                    the_message = f"{timestamp} {encrypted_emoji}{message[1]}: {message[2]}\n"
-                else:
-                    the_message = f"{timestamp} {message[1]}: {message[2]}\n"
-                message_history.insert(tk.END, the_message)
-
-            message_history.config(state=tk.DISABLED)
-
-    except sqlite3.Error as e:
-        print(f"SQLite error in load_message_history_from_db: {e}")
-
-    finally:
-        db_connection.close()
 
 
 def erase_nodedb():
@@ -2322,7 +2506,7 @@ def erase_nodedb():
 
     table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_nodeinfo"
 
-    confirmed = tkinter.messagebox.askyesno("Confirmation", f"Are you sure you want to erase the database: {db_file_path} for channel {channel}?")
+    confirmed = console_confirmation(f"Are you sure you want to erase the database: {db_file_path} for channel {channel}?")
 
     if confirmed:
         try:
@@ -2340,12 +2524,11 @@ def erase_nodedb():
             db_connection.close()
 
             # Clear the display
-            nodeinfo_window.config(state=tk.NORMAL)
-            nodeinfo_window.delete('1.0', tk.END)
-            nodeinfo_window.config(state=tk.DISABLED)
-            update_gui(f"{format_time(current_time())} >>> Node database for channel {channel} erased successfully.", tag="info")
+            if debug:
+                print("Node database cleared")
+            update_console(f"{format_time(current_time())} >>> Node database for channel {channel} erased successfully.", tag="info")
     else:
-        update_gui(f"{format_time(current_time())} >>> Node database erase for channel {channel} cancelled.", tag="info")
+        update_console(f"{format_time(current_time())} >>> Node database erase for channel {channel} cancelled.", tag="info")
 
 
 def erase_messagedb():
@@ -2356,7 +2539,7 @@ def erase_messagedb():
 
     table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_messages"
 
-    confirmed = tkinter.messagebox.askyesno("Confirmation", f"Are you sure you want to erase the message history of: {db_file_path} for channel {channel}?")
+    confirmed = console_confirmation(f"Are you sure you want to erase the message history of: {db_file_path} for channel {channel}?")
 
     if confirmed:
         try:
@@ -2374,12 +2557,11 @@ def erase_messagedb():
             db_connection.close()
 
             # Clear the display
-            message_history.config(state=tk.NORMAL)
-            message_history.delete('1.0', tk.END)
-            message_history.config(state=tk.DISABLED)
-            update_gui(f"{format_time(current_time())} >>> Message history for channel {channel} erased successfully.", tag="info")
+            if debug:
+                print("Message history cleared")
+            update_console(f"{format_time(current_time())} >>> Message history for channel {channel} erased successfully.", tag="info")
     else:
-        update_gui(f"{format_time(current_time())} >>> Message history erase for channel {channel} cancelled.", tag="info")
+        update_console(f"{format_time(current_time())} >>> Message history erase for channel {channel} cancelled.", tag="info")
 
 
 #################################
@@ -2393,7 +2575,7 @@ def connect_mqtt():
 
     if debug:
         print("connect_mqtt")
-    global mqtt_broker, mqtt_port, mqtt_username, mqtt_password, root_topic, channel, node_number, db_file_path, key
+    global mqtt_broker, mqtt_port, mqtt_username, mqtt_password, root_topic, root_topics, channel, node_number, db_file_path, key
     if not client.is_connected():
         try:
             # Use configuration values directly instead of GUI entries
@@ -2408,8 +2590,6 @@ def connect_mqtt():
 
             if not move_text_up(): # copy ID to Number and test for 8 bit hex
                 return
-            
-            node_number = int(node_number_entry.get())  # Convert the input to an integer
 
             padded_key = key.ljust(len(key) + ((4 - (len(key) % 4)) % 4), '=')
             replaced_key = padded_key.replace('-', '+').replace('_', '/')
@@ -2426,13 +2606,13 @@ def connect_mqtt():
                 client.tls_insecure_set(False)
                 connect_mqtt.tls_configured = True
             client.connect(mqtt_broker, mqtt_port, 60)
-            update_gui(f"{format_time(current_time())} >>> Connecting to MQTT broker at {mqtt_broker}...", tag="info")
+            update_console(f"{format_time(current_time())} >>> Connecting to MQTT broker at {mqtt_broker}...", tag="info")
 
         except Exception as e:
-            update_gui(f"{format_time(current_time())} >>> Failed to connect to MQTT broker: {str(e)}", tag="info")
+            update_console(f"{format_time(current_time())} >>> Failed to connect to MQTT broker: {str(e)}", tag="info")
 
         update_node_list()
-    elif client.is_connected() and channel_entry.get() is not channel:
+    elif client.is_connected() and channel != channel:  # Fixed comparison
         print("Channel has changed, disconnect and reconnect")
         if auto_reconnect:
             print("auto_reconnect disconnecting from MQTT broker")
@@ -2442,7 +2622,7 @@ def connect_mqtt():
             connect_mqtt()
 
     else:
-        update_gui(f"{format_time(current_time())} >>> Already connected to {mqtt_broker}", tag="info")
+        update_console(f"{format_time(current_time())} >>> Already connected to {mqtt_broker}", tag="info")
 
 
 def disconnect_mqtt():
@@ -2452,13 +2632,12 @@ def disconnect_mqtt():
         print("disconnect_mqtt")
     if client.is_connected():
         client.disconnect()
-        update_gui(f"{format_time(current_time())} >>> Disconnected from MQTT broker", tag="info")
+        update_console(f"{format_time(current_time())} >>> Disconnected from MQTT broker", tag="info")
         # Clear the display
-        nodeinfo_window.config(state=tk.NORMAL)
-        nodeinfo_window.delete('1.0', tk.END)
-        nodeinfo_window.config(state=tk.DISABLED)
+        if debug:
+            print("Node list cleared")
     else:
-        update_gui("Already disconnected", tag="info")
+        update_console("Already disconnected", tag="info")
 
 
 def on_connect(client, userdata, flags, reason_code, properties):		# pylint: disable=unused-argument
@@ -2474,18 +2653,25 @@ def on_connect(client, userdata, flags, reason_code, properties):		# pylint: dis
     if reason_code == 0:
         load_message_history_from_db()
         if debug:
-            print(f"Subscribe Topic is: {subscribe_topic}")
-        client.subscribe(subscribe_topic)
-        message = f"{format_time(current_time())} >>> Connected to {mqtt_broker} on topic {channel} as {'!' + hex(node_number)[2:]}"
-        update_gui(message, tag="info")
+            print(f"Subscribe Topics are: {subscribe_topics}")
+        
+        # Subscribe to all topics
+        for topic in subscribe_topics:
+            client.subscribe(topic)
+            if debug:
+                print(f"Subscribed to: {topic}")
+        
+        topic_list = ", ".join([topic.replace(f"{channel}/#", f"{channel}") for topic in subscribe_topics])
+        message = f"{format_time(current_time())} >>> Connected to {mqtt_broker} on topics {topic_list} as {'!' + hex(node_number)[2:]}"
+        update_console(message, tag="info")
         send_node_info(BROADCAST_NUM, want_response=False)
 
-        if lon_entry.get() and lon_entry.get():
+        if lon and lat:  # Use config values instead of GUI
             send_position(BROADCAST_NUM)
 
     else:
         message = f"{format_time(current_time())} >>> Failed to connect to MQTT broker with result code {str(reason_code)}"
-        update_gui(message, tag="info")
+        update_console(message, tag="info")
 
 
 def on_disconnect(client, userdata, flags, reason_code, properties):		# pylint: disable=unused-argument
@@ -2495,7 +2681,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties):		# pylint: 
         print("on_disconnect")
     if reason_code != 0:
         message = f"{format_time(current_time())} >>> Disconnected from MQTT broker with result code {str(reason_code)}"
-        update_gui(message, tag="info")
+        update_console(message, tag="info")
         if auto_reconnect is True:
             print("attempting to reconnect in " + str(auto_reconnect_delay) + " second(s)")
             time.sleep(auto_reconnect_delay)
@@ -2503,11 +2689,10 @@ def on_disconnect(client, userdata, flags, reason_code, properties):		# pylint: 
 
 
 ############################
-# GUI Functions
+# Console Functions
 
 def update_node_list():
-    """?"""
-
+    """Print node list to console instead of GUI."""
     try:
         table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_nodeinfo"
 
@@ -2517,16 +2702,12 @@ def update_node_list():
             # Fetch all nodes from the database
             nodes = db_cursor.execute(f'SELECT user_id, short_name, long_name FROM {table_name} ORDER BY short_name COLLATE NOCASE ASC, long_name COLLATE NOCASE ASC').fetchall()
 
-            # Clear the display
-            nodeinfo_window.config(state=tk.NORMAL)
-            nodeinfo_window.delete('1.0', tk.END)
-
-            # Display each node in the nodeinfo_window widget
-            for node_record in nodes:
-                node = Node(*node_record)
-                nodeinfo_window.insert(tk.END, node.node_list_disp + "\n")
-
-            nodeinfo_window.config(state=tk.DISABLED)
+            # Print each node to console if debug is enabled
+            if debug:
+                print("Node list:")
+                for node_record in nodes:
+                    node = Node(*node_record)
+                    print(f"  {node.node_list_disp}")
 
     except sqlite3.Error as e:
         print(f"SQLite error in update_node_list: {e}")
@@ -2535,74 +2716,53 @@ def update_node_list():
         db_connection.close()
 
 
-def update_gui(text_payload, tag=None, text_widget=None):
-    """?"""
-
-    text_widget = text_widget or message_history
+def load_message_history_from_db():
+    """Load previously stored messages from sqlite - console version."""
     if debug:
-        print(f"updating GUI with: {text_payload}")
-    text_widget.config(state=tk.NORMAL)
-    text_widget.insert(tk.END, f"{text_payload}\n", tag)
-    text_widget.config(state=tk.DISABLED)
-    text_widget.yview(tk.END)
+        print("load_message_history_from_db")
 
+    table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_messages"
 
-def on_nodeinfo_enter(event):							# pylint: disable=unused-argument
-    """Change the cursor to a pointer when hovering over text."""
-    nodeinfo_window.config(cursor="cross")
+    try:
+        with sqlite3.connect(db_file_path) as db_connection:
+            db_cursor = db_connection.cursor()
 
+            # Fetch recent messages from the database (limit to last 10 for console)
+            messages = db_cursor.execute(f'SELECT time, sender_short_name, text_payload, is_encrypted FROM {table_name} ORDER BY time DESC LIMIT 10').fetchall()
 
-def on_nodeinfo_leave(event):							# pylint: disable=unused-argument
-    """Change the cursor back to the default when leaving the widget."""
-    nodeinfo_window.config(cursor="")
+            if debug and messages:
+                print("Recent message history:")
+                for message in reversed(messages):  # Show in chronological order
+                    timestamp = format_time(message[0])
+                    emoji = encrypted_emoji if message[3] == 1 else ""
+                    print(f"  {timestamp} {emoji}{message[1]}: {message[2]}")
 
+    except sqlite3.Error as e:
+        print(f"SQLite error in load_message_history_from_db: {e}")
 
-def on_nodeinfo_click(event):							# pylint: disable=unused-argument
-    """?"""
-
-    if debug:
-        print("on_nodeinfo_click")
-
-    # Get the index of the clicked position
-    index = nodeinfo_window.index(tk.CURRENT)
-
-    # Extract the user_id from the clicked line
-    clicked_line = nodeinfo_window.get(index + "linestart", index + "lineend")
-    to_id = clicked_line.split(",")[0].strip()
-
-    # Update the "to" variable with the clicked user_id
-    entry_dm.delete(0, tk.END)
-    entry_dm.insert(0, to_id)
+    finally:
+        db_connection.close()
 
 
 def move_text_up():
-    """?"""
-
-    text = node_id_entry.get()
-    if not is_valid_hex(text, 8, 8):
-        print ("Not valid Hex")
-        messagebox.showwarning("Warning", "Not a valid Hex ID")
+    """Validate node ID - console version."""
+    # For console version, just validate that node_number is valid hex
+    node_id_str = '!' + hex(node_number)[2:]
+    if not is_valid_hex(node_id_str, 8, 8):
+        print("Not valid Hex")
         return False
     else:
-        text = int(text.replace("!", ""), 16)
-        node_number_entry.delete(0, "end")
-        node_number_entry.insert(0, text)
         return True
 
 
 def move_text_down():
-    """?"""
-
-    text = node_number_entry.get()
-    text = '!{}'.format(hex(int(text))[2:])
-
-    if not is_valid_hex(text, 8, 8):
-        print ("Not valid Hex")
-        messagebox.showwarning("Warning", "Not a valid Hex ID")
+    """Convert node number to hex - console version."""
+    # For console version, just return the hex representation
+    node_id_str = '!' + hex(node_number)[2:]
+    if not is_valid_hex(node_id_str, 8, 8):
+        print("Not valid Hex")
         return False
     else:
-        node_id_entry.delete(0, "end")
-        node_id_entry.insert(0, text)
         return True
 
 
@@ -2624,14 +2784,14 @@ def send_node_info_periodically() -> None:
         if client.is_connected():
             send_node_info(BROADCAST_NUM, want_response=False)
 
-            if lon_entry.get() and lon_entry.get():
+            if lon and lat:  # Use config values instead of GUI
                 send_position(BROADCAST_NUM)
 
         time.sleep(node_info_interval_minutes * 60)  # Convert minutes to seconds
 
 
 def on_exit():
-    """Function to be called when the GUI is closed."""
+    """Function to be called when the application is closed."""
     if client.is_connected():
         client.disconnect()
         print("client disconnected")
@@ -2639,21 +2799,10 @@ def on_exit():
     # Save configuration before exiting
     save_config()
     
-    root.destroy()
     client.loop_stop()
 
 
-
-
-### tcl upstream bug warning
-tcl = tk.Tcl()
-if sys.platform.startswith('darwin'):
-    print(f"\n\n**** IF MAC OS SONOMA **** you are using tcl version: {tcl.call('info', 'patchlevel')}")
-    print("If < version 8.6.13, mouse clicks will only be recognized when the mouse is moving")
-    print("unless the window is moved from it's original position.")
-    print("The built in window auto-centering code may help with this\n\n")
-
-# Use node number from config.ini instead of generating random one
+# Global initialization (moved from middle of file)
 node_name = '!' + hex(node_number)[2:]
 if not is_valid_hex(node_name, 8, 8):
     print('Invalid node name from config: ' + str(node_name))
@@ -2661,272 +2810,18 @@ if not is_valid_hex(node_name, 8, 8):
 
 global_message_id = random.getrandbits(32)
 
-############################
-# GUI Layout
-
-root = tk.Tk()
-root.title("Meshtastic MQTT Connect")
-
-# Create PanedWindow
-paned_window = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
-paned_window.grid(row=0, column=0, padx=5, pady=5, sticky=tk.NSEW)
-
-# Log Frame
-message_log_frame = tk.Frame(paned_window)
-paned_window.add(message_log_frame)
-
-# Info Frame
-node_info_frame = tk.Frame(paned_window)
-paned_window.add(node_info_frame)
-
-# Set weights for resizable frames
-paned_window.paneconfigure(message_log_frame)
-paned_window.paneconfigure(node_info_frame)
-
-root.grid_rowconfigure(0, weight=1)
-root.grid_columnconfigure(0, weight=1)
-message_log_frame.grid_rowconfigure(11, weight=1)
-message_log_frame.grid_columnconfigure(1, weight=1)
-message_log_frame.grid_columnconfigure(2, weight=1)
-node_info_frame.grid_rowconfigure(0, weight=1)
-node_info_frame.grid_columnconfigure(0, weight=1)
-
-w = 1200 # ~width for the Tk root
-h = 900 # ~height for the Tk root
-
-ws = root.winfo_screenwidth() # width of the screen
-hs = root.winfo_screenheight() # height of the screen
-x = (ws/2) - (w/2)
-y = (hs/2) - (h/2)
-
-root.geometry("+%d+%d" %(x,y))
-# root.resizable(0,0)
-
-### SERVER SETTINGS
-mqtt_broker_label = tk.Label(message_log_frame, text="MQTT Broker:")
-mqtt_broker_label.grid(row=0, column=0, padx=5, pady=1, sticky=tk.W)
-
-mqtt_broker_entry = tk.Entry(message_log_frame)
-mqtt_broker_entry.grid(row=0, column=1, padx=5, pady=1, sticky=tk.EW)
-mqtt_broker_entry.insert(0, mqtt_broker)
-
-
-mqtt_username_label = tk.Label(message_log_frame, text="MQTT Username:")
-mqtt_username_label.grid(row=1, column=0, padx=5, pady=1, sticky=tk.W)
-
-mqtt_username_entry = tk.Entry(message_log_frame)
-mqtt_username_entry.grid(row=1, column=1, padx=5, pady=1, sticky=tk.EW)
-mqtt_username_entry.insert(0, mqtt_username)
-
-
-mqtt_password_label = tk.Label(message_log_frame, text="MQTT Password:")
-mqtt_password_label.grid(row=2, column=0, padx=5, pady=1, sticky=tk.W)
-
-mqtt_password_entry = tk.Entry(message_log_frame, show="*")
-mqtt_password_entry.grid(row=2, column=1, padx=5, pady=1, sticky=tk.EW)
-mqtt_password_entry.insert(0, mqtt_password)
-
-
-root_topic_label = tk.Label(message_log_frame, text="Root Topic:")
-root_topic_label.grid(row=3, column=0, padx=5, pady=1, sticky=tk.W)
-
-root_topic_entry = tk.Entry(message_log_frame)
-root_topic_entry.grid(row=3, column=1, padx=5, pady=1, sticky=tk.EW)
-root_topic_entry.insert(0, root_topic)
-
-
-channel_label = tk.Label(message_log_frame, text="Channel:")
-channel_label.grid(row=4, column=0, padx=5, pady=1, sticky=tk.W)
-
-channel_entry = tk.Entry(message_log_frame)
-channel_entry.grid(row=4, column=1, padx=5, pady=1, sticky=tk.EW)
-channel_entry.insert(0, channel)
-
-
-key_label = tk.Label(message_log_frame, text="Key:")
-key_label.grid(row=5, column=0, padx=5, pady=1, sticky=tk.W)
-
-key_entry = tk.Entry(message_log_frame)
-key_entry.grid(row=5, column=1, padx=5, pady=1, sticky=tk.EW)
-key_entry.insert(0, key)
-
-
-id_frame = tk.Frame(message_log_frame)
-id_frame.grid(row=6, column=0, columnspan=2, sticky=tk.EW)
-
-id_frame.columnconfigure(0, weight=0)
-id_frame.columnconfigure(1, weight=0)  # Button columns don't expand
-id_frame.columnconfigure(2, weight=1)
-
-node_number_label = tk.Label(id_frame, text="Node Number:")
-node_number_label.grid(row=0, column=0, padx=5, pady=1, sticky=tk.W)
-
-up_button = tk.Button(id_frame, text="↑", command=move_text_up)
-up_button.grid(row=0, column=1)
-
-node_number_entry = tk.Entry(id_frame)
-node_number_entry.grid(row=0, column=2, padx=5, pady=1, sticky=tk.EW)
-node_number_entry.insert(0, node_number)
-
-
-node_id_label = tk.Label(id_frame, text="Node ID:")
-node_id_label.grid(row=1, column=0, padx=5, pady=1, sticky=tk.W)
-
-down_button = tk.Button(id_frame, text="↓", command=move_text_down)
-down_button.grid(row=1, column=1)
-
-node_id_entry = tk.Entry(id_frame)
-node_id_entry.grid(row=1, column=2, padx=5, pady=1, sticky=tk.EW)
-move_text_down()
-
-
-separator_label = tk.Label(message_log_frame, text="____________")
-separator_label.grid(row=7, column=0, padx=5, pady=1, sticky=tk.W)
-
-
-long_name_label = tk.Label(message_log_frame, text="Long Name:")
-long_name_label.grid(row=8, column=0, padx=5, pady=1, sticky=tk.W)
-
-long_name_entry = tk.Entry(message_log_frame)
-long_name_entry.grid(row=8, column=1, padx=5, pady=1, sticky=tk.EW)
-long_name_entry.insert(0, client_long_name)
-
-short_name_label = tk.Label(message_log_frame, text="Short Name:")
-short_name_label.grid(row=9, column=0, padx=5, pady=1, sticky=tk.W)
-
-short_name_entry = tk.Entry(message_log_frame)
-short_name_entry.grid(row=9, column=1, padx=5, pady=1, sticky=tk.EW)
-short_name_entry.insert(0, client_short_name)
-
-
-pos_frame = tk.Frame(message_log_frame)
-pos_frame.grid(row=10, column=0, columnspan=2, sticky=tk.EW)
-
-lat_label = tk.Label(pos_frame, text="Lat:")
-lat_label.grid(row=0, column=0, padx=5, pady=1, sticky=tk.EW)
-
-lat_entry = tk.Entry(pos_frame, width=8)
-lat_entry.grid(row=0, column=1, padx=5, pady=1, sticky=tk.EW)
-lat_entry.insert(0, lat)
-
-lon_label = tk.Label(pos_frame, text="Lon:")
-lon_label.grid(row=0, column=3, padx=5, pady=1, sticky=tk.EW)
-
-lon_entry = tk.Entry(pos_frame, width=8)
-lon_entry.grid(row=0, column=4, padx=5, pady=1, sticky=tk.EW)
-lon_entry.insert(0, lon)
-
-alt_label = tk.Label(pos_frame, text="Alt:")
-alt_label.grid(row=0, column=5, padx=5, pady=1, sticky=tk.EW)
-
-alt_entry = tk.Entry(pos_frame, width=8)
-alt_entry.grid(row=0, column=6, padx=5, pady=1, sticky=tk.EW)
-alt_entry.insert(0, alt)
-
-
-### BUTTONS
-
-
-button_frame = tk.Frame(message_log_frame)
-button_frame.grid(row=0, column=2, rowspan=11, sticky=tk.NSEW)
-
-connect_button = tk.Button(button_frame, text="Connect", command=connect_mqtt)
-connect_button.grid(row=0, column=2, padx=5, pady=1, sticky=tk.EW)
-
-disconnect_button = tk.Button(button_frame, text="Disconnect", command=disconnect_mqtt)
-disconnect_button.grid(row=1, column=2, padx=5, pady=1, sticky=tk.EW)
-
-node_info_button = tk.Button(button_frame, text="Send NodeInfo", command=lambda: send_node_info(BROADCAST_NUM, want_response=True))
-node_info_button.grid(row=2, column=2, padx=5, pady=1, sticky=tk.EW)
-
-erase_nodedb_button = tk.Button(button_frame, text="Erase NodeDB", command=erase_nodedb)
-erase_nodedb_button.grid(row=3, column=2, padx=5, pady=1, sticky=tk.EW)
-
-erase_messagedb_button = tk.Button(button_frame, text="Erase Message History", command=erase_messagedb)
-erase_messagedb_button.grid(row=4, column=2, padx=5, pady=1, sticky=tk.EW)
-
-test_broadcast_button = tk.Button(button_frame, text="Test Broadcast", command=send_test_broadcast)
-test_broadcast_button.grid(row=5, column=2, padx=5, pady=1, sticky=tk.EW)
-
-test_direct_button = tk.Button(button_frame, text="Test Direct", command=lambda: send_test_direct_message(3007869591))
-test_direct_button.grid(row=6, column=2, padx=5, pady=1, sticky=tk.EW)
-
-### INTERFACE WINDOW
-message_history = scrolledtext.ScrolledText(message_log_frame, wrap=tk.WORD)
-message_history.grid(row=11, column=0, columnspan=3, padx=5, pady=10, sticky=tk.NSEW)
-message_history.config(state=tk.DISABLED)
-
-if color_text:
-    message_history.tag_config('dm', background='light goldenrod')
-    message_history.tag_config('encrypted', background='green')
-    message_history.tag_config('info', foreground='gray')
-
-### MESSAGE ENTRY
-enter_message_label = tk.Label(message_log_frame, text="Enter message:")
-enter_message_label.grid(row=12, column=0, padx=5, pady=1, sticky=tk.W)
-
-message_entry = tk.Entry(message_log_frame)
-message_entry.grid(row=13, column=0, columnspan=3, padx=5, pady=1, sticky=tk.EW)
-
-### MESSAGE ACTION
-entry_dm_label = tk.Label(message_log_frame, text="DM to (click a node):")
-entry_dm_label.grid(row=14, column=1, padx=5, pady=1, sticky=tk.E)
-
-entry_dm = tk.Entry(message_log_frame)
-entry_dm.grid(row=14, column=2, padx=5, pady=1, sticky=tk.EW)
-
-broadcast_button = tk.Button(message_log_frame, text="Broadcast Message", command=lambda: publish_message(BROADCAST_NUM))
-broadcast_button.grid(row=15, column=0, padx=5, pady=1, sticky=tk.EW)
-
-dm_button = tk.Button(message_log_frame, text="Direct Message", command=lambda: direct_message(entry_dm.get()))
-dm_button.grid(row=15, column=2, padx=5, pady=1, sticky=tk.EW)
-
-tr_button = tk.Button(message_log_frame, text="Trace Route", command=lambda: send_traceroute(entry_dm.get()))
-tr_button.grid(row=16, column=2, padx=5, pady=1 if display_lookup_button else (1,5), sticky=tk.EW)
-
-if display_lookup_button:
-    def lookup_action():
-        entry_value = entry_dm.get()[1:]  # Get the string without the first character
-        if entry_value:  # Check if the string is not empty
-            try:
-                hex_value = int(entry_value, 16)
-                get_name_by_id("short", hex_value)
-            except ValueError:
-                print("Invalid hex value")
-        else:
-            print("Entry is empty")
-    
-    lookup_button = tk.Button(message_log_frame, text="Lookup", command=lookup_action)
-    lookup_button.grid(row=17, column=2, padx=5, pady=(1,5), sticky=tk.EW)
-
-### NODE LIST
-nodeinfo_window = scrolledtext.ScrolledText(node_info_frame, wrap=tk.WORD, width=50)
-nodeinfo_window.grid(row=0, column=0, padx=5, pady=1, sticky=tk.NSEW)
-nodeinfo_window.bind("<Enter>", on_nodeinfo_enter)
-nodeinfo_window.bind("<Leave>", on_nodeinfo_leave)
-nodeinfo_window.bind("<Button-1>", on_nodeinfo_click)
-nodeinfo_window.config(state=tk.DISABLED)
-
-
-############################
-# Main Threads
-
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="", clean_session=True, userdata=None)
-client.on_connect = on_connect
-client.on_disconnect = on_disconnect
-client.on_message = on_message
-
-mqtt_thread = threading.Thread(target=mqtt_thread, daemon=True)
-mqtt_thread.start()
-
-node_info_timer = threading.Thread(target=send_node_info_periodically, daemon=True)
-node_info_timer.start()
-
-# Set the exit handler
-root.protocol("WM_DELETE_WINDOW", on_exit)
-
-# Start the main loop
-root.mainloop()
+def update_console(text_payload, tag=None):
+    """Print message to console instead of GUI."""
+    if debug:
+        print(f"[{tag if tag else 'INFO'}] {text_payload}")
+    else:
+        print(text_payload)
+
+
+def console_confirmation(message):
+    """Simple console confirmation instead of GUI messagebox."""
+    response = input(f"{message} (y/n): ").lower().strip()
+    return response in ['y', 'yes']
 
 
 #################################
@@ -2966,3 +2861,40 @@ def send_post_content(destination_id, board_name, post_number):
     else:
         error_text = "Invalid post number.\n\nReply [B]ack to return to posts."
         send_direct_message(destination_id, error_text)
+
+
+############################
+# Main Application Startup
+
+if __name__ == "__main__":
+    print("Meshtastic MQTT Connect - Console Mode")
+    print("======================================")
+    print(f"Node: {node_name} ({client_short_name})")
+    print(f"MQTT Broker: {mqtt_broker}")
+    print(f"Channel: {channel}")
+    print(f"Root Topics: {', '.join(root_topics)}")
+    print("Starting MQTT client...")
+
+    # Initialize MQTT client
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="", clean_session=True, userdata=None)
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.on_message = on_message
+
+    # Start background threads
+    mqtt_thread = threading.Thread(target=mqtt_thread, daemon=True)
+    mqtt_thread.start()
+
+    node_info_timer = threading.Thread(target=send_node_info_periodically, daemon=True)
+    node_info_timer.start()
+
+    # Auto-connect to MQTT
+    connect_mqtt()
+
+    # Keep the application running
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        on_exit()
