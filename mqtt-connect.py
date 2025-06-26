@@ -51,6 +51,9 @@ submenu_states = {}  # Submenu within system: 'boards', 'posts', 'inbox', 'sent'
 # Node-Topic tracking
 node_topic_map = {}  # Track which topic each node was last seen on
 
+# Mail notification throttling
+last_notification_time = {}  # Track last notification time per node to prevent spam
+
 def update_user_state(user_id, state):
     """Update user state for BBS operations."""
     user_states[user_id] = state
@@ -115,6 +118,20 @@ def get_node_topic(node_id):
                 print(f"  Node {tracked_node}: {tracked_topic}")
     return topic
 
+def should_throttle_notification(node_id):
+    """Check if we should throttle notifications to prevent spam."""
+    current_time = time.time()
+    last_time = last_notification_time.get(node_id, 0)
+    
+    if current_time - last_time < mail_notification_min_interval:
+        if debug:
+            print(f"Throttling notification to {node_id} - last sent {current_time - last_time:.1f}s ago (min interval: {mail_notification_min_interval}s)")
+        return True
+    
+    # Update the last notification time
+    last_notification_time[node_id] = current_time
+    return False
+
 #################################
 ### Configuration Loading
 #################################
@@ -124,6 +141,7 @@ def load_config():
     global mqtt_broker, mqtt_port, mqtt_username, mqtt_password, root_topic, root_topics, channel, key
     global node_number, client_long_name, client_short_name, lat, lon, alt
     global bbs_enabled, bbs_nodes, debug, auto_reconnect, auto_reconnect_delay
+    global mail_notification_delay, mail_notification_throttle_delay, mail_notification_min_interval
     global print_service_envelope, print_message_packet, print_text_message, print_node_info
     global print_telemetry, print_failed_encryption_packet, print_position_report, color_text
     global display_encrypted_emoji, display_dm_emoji, display_lookup_button, display_private_dms
@@ -170,6 +188,11 @@ def load_config():
         debug = config.getboolean('DEFAULT', 'debug', fallback=True)
         auto_reconnect = config.getboolean('DEFAULT', 'auto_reconnect', fallback=False)
         auto_reconnect_delay = config.getfloat('DEFAULT', 'auto_reconnect_delay', fallback=1.0)
+        
+        # Mail notification timing settings
+        mail_notification_delay = config.getfloat('DEFAULT', 'mail_notification_delay', fallback=6.0)
+        mail_notification_throttle_delay = config.getfloat('DEFAULT', 'mail_notification_throttle_delay', fallback=2.0)
+        mail_notification_min_interval = config.getfloat('DEFAULT', 'mail_notification_min_interval', fallback=30.0)
         print_service_envelope = config.getboolean('DEFAULT', 'print_service_envelope', fallback=False)
         print_message_packet = config.getboolean('DEFAULT', 'print_message_packet', fallback=False)
         print_text_message = config.getboolean('DEFAULT', 'print_text_message', fallback=False)
@@ -1278,19 +1301,50 @@ def generate_mesh_packet(destination_id, encoded_message):
                 else:
                     print(f"MQTT publish failed to {broadcast_topic} with code: {result.rc}")
     else:
-        # For direct messages, use the primary topic
-        if debug:
-            print(f"Publishing to primary topic: {publish_topic}")
-            print(f"Payload size: {len(payload)} bytes")
+        # For direct messages, try to send to recipient's last known topic first
+        recipient_topic = get_node_topic(destination_id)
         
-        result = client.publish(publish_topic, payload)
-        
-        if debug:
-            print(f"MQTT publish result: {result.rc}")
-            if result.rc == 0:
-                print("MQTT publish successful")
-            else:
-                print(f"MQTT publish failed with code: {result.rc}")
+        if recipient_topic:
+            # Send to the specific topic where recipient was last seen
+            if debug:
+                print(f"Sending direct message to recipient's last known topic: {recipient_topic}")
+                print(f"Payload size: {len(payload)} bytes")
+            
+            result = client.publish(recipient_topic, payload)
+            
+            if debug:
+                print(f"MQTT publish result for {recipient_topic}: {result.rc}")
+                if result.rc == 0:
+                    print(f"Direct message published successfully to {recipient_topic}")
+                else:
+                    print(f"Direct message failed to {recipient_topic} with code: {result.rc}")
+        else:
+            # Fallback: broadcast to all topics with recipient-specific topics
+            if debug:
+                print(f"No known topic for recipient {destination_id}, broadcasting to all regions")
+                print(f"Payload size: {len(payload)} bytes")
+            
+            # Convert destination_id to hex format for topic
+            recipient_hex = '!' + hex(destination_id)[2:]
+            
+            # Publish to all root topics with recipient's node ID
+            for i, root_topic in enumerate(root_topics):
+                direct_topic = root_topic + channel + "/" + recipient_hex
+                if debug:
+                    print(f"Publishing direct message to topic {i+1}/{len(root_topics)}: {direct_topic}")
+                
+                result = client.publish(direct_topic, payload)
+                
+                if debug:
+                    print(f"MQTT publish result for {direct_topic}: {result.rc}")
+                    if result.rc == 0:
+                        print(f"Direct message published successfully to {direct_topic}")
+                    else:
+                        print(f"Direct message failed to {direct_topic} with code: {result.rc}")
+                
+                # Add small delay between publications to avoid overwhelming the broker
+                if i < len(root_topics) - 1:  # Don't delay after the last topic
+                    time.sleep(0.1)
 
 
 def encrypt_message(channel, key, mesh_packet, encoded_message):
@@ -1377,6 +1431,9 @@ def generate_targeted_mail_notification_packet(destination_id, encoded_message, 
     if debug:
         print(f"Publishing targeted mail notification to: {notification_topic}")
     
+    # Add throttling delay before publishing
+    time.sleep(mail_notification_throttle_delay)
+    
     result = client.publish(notification_topic, payload)
     
     if debug:
@@ -1434,10 +1491,18 @@ def generate_mail_notification_packet(destination_id, encoded_message):
         print(f"Payload size: {len(payload)} bytes")
     
     # Publish to ALL root topics to ensure delivery regardless of recipient's region
+    if debug:
+        print(f"Root topics configured: {root_topics}")
+        print(f"Channel: {channel}, Node name: {node_name}")
+    
     for i, root_topic in enumerate(root_topics):
         notification_topic = root_topic + channel + "/" + node_name
         if debug:
             print(f"Publishing mail notification to topic {i+1}/{len(root_topics)}: {notification_topic}")
+        
+        # Add throttling delay between each topic publication
+        if i > 0:  # Don't delay before the first topic
+            time.sleep(mail_notification_throttle_delay)
         
         result = client.publish(notification_topic, payload)
         
@@ -1447,6 +1512,9 @@ def generate_mail_notification_packet(destination_id, encoded_message):
                 print(f"Mail notification published successfully to {notification_topic}")
             else:
                 print(f"Mail notification failed to {notification_topic} with code: {result.rc}")
+    
+    if debug:
+        print(f"Mail notification broadcast complete - published to {len(root_topics)} topics")
 
 
 def send_ack(destination_id, message_id):
@@ -1708,10 +1776,16 @@ def send_direct_message(destination_id, message):
 
 
 def send_mail_notification(destination_id, message):
-    """Send a mail notification to a specific node via the topic they were last seen on."""
+    """Send a mail notification to a specific node - always broadcast to all topics to ensure delivery."""
     if not client.is_connected():
         if debug:
             print("Not connected to MQTT broker, skipping mail notification")
+        return
+
+    # Check if we should throttle this notification
+    if should_throttle_notification(destination_id):
+        if debug:
+            print(f"Skipping mail notification to {destination_id} due to throttling")
         return
 
     try:
@@ -1721,27 +1795,15 @@ def send_mail_notification(destination_id, message):
         encoded_message.payload = message.encode("utf-8")
         encoded_message.bitfield = 1
         
-        # Get the topic where this node was last seen
-        node_topic = get_node_topic(destination_id)
+        if debug:
+            print(f"Broadcasting mail notification to {destination_id} across all root topics to ensure delivery")
         
-        if node_topic:
-            if debug:
-                print(f"Sending mail notification to {destination_id} via specific topic: {node_topic}")
-            
-            # Generate mail notification packet for the specific topic
-            generate_targeted_mail_notification_packet(destination_id, encoded_message, node_topic)
-            
-            if debug:
-                print(f"Mail notification sent to {destination_id} via topic: {node_topic}")
-        else:
-            if debug:
-                print(f"No topic found for node {destination_id}, broadcasting to all topics as fallback")
-            
-            # Fallback to broadcasting to all topics
-            generate_mail_notification_packet(destination_id, encoded_message)
-            
-            if debug:
-                print(f"Mail notification sent to {destination_id} via all topics (fallback)")
+        # Always broadcast to all topics to ensure cross-region delivery
+        # This ensures that users on different root topics receive notifications
+        generate_mail_notification_packet(destination_id, encoded_message)
+        
+        if debug:
+            print(f"Mail notification broadcasted to {destination_id} via all topics")
             
     except Exception as e:
         print(f"Error sending mail notification: {str(e)}")
@@ -1878,7 +1940,7 @@ def handle_compose_content(destination_id, content_input):
         
         # Notify recipient that they have new mail
         def delayed_mail_notification():
-            time.sleep(4.0)  # Longer delay before notifying recipient
+            time.sleep(mail_notification_delay)  # Configurable delay before notifying recipient
             mail_notification = "✉️ You've got mail! ✉️"
             send_mail_notification(recipient_node_id, mail_notification)
         
