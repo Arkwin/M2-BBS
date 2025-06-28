@@ -1725,6 +1725,11 @@ def send_auto_response_via_test_function(target_id):
         return
 
     try:
+        # Add delay before sending welcome message
+        if debug:
+            print(f"Waiting {mail_notification_delay} seconds before sending welcome message to {target_id}")
+        time.sleep(mail_notification_delay)
+        
         # Send welcome menu message
         welcome_text = "✉️Welcome to Mesh Mail!✉️"
         
