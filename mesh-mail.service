@@ -1,0 +1,29 @@
+[Unit]
+Description=Mesh Mail - Meshtastic MQTT Mail Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 mqtt-connect.py
+WorkingDirectory=/opt/mesh-mail
+Restart=always
+RestartSec=10
+User=kara
+Group=kara
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mesh-mail
+
+# Security (optional - can be added for extra security)
+# NoNewPrivileges=yes
+# ProtectSystem=strict
+# PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target 

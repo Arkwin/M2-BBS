@@ -1018,7 +1018,10 @@ def process_message(mp, text_payload, is_encrypted):
                     print(f"Message processing complete, now sending welcome menu to {from_node}")
                 # Send welcome menu in a separate thread with a small delay
                 def delayed_auto_response():
-                    time.sleep(3.0)  # Wait 3 seconds
+                    time.sleep(1.0)  # Reduced delay to 1 second
+                    if debug:
+                        print(f"About to send welcome message to {from_node}")
+                        print(f"Node topic before welcome: {get_node_topic(from_node)}")
                     # Use the exact same function that works for test direct messages
                     send_auto_response_via_test_function(from_node)
                 
@@ -1437,16 +1440,20 @@ def generate_targeted_mail_notification_packet(destination_id, encoded_message, 
         print(f"Targeted mail notification - Sending to specific topic: {target_topic}")
         print(f"Payload size: {len(payload)} bytes")
     
-    # Extract the root topic from the target topic (remove the channel/node part)
+    # Use the specific topic where recipient was last seen
     # target_topic format: "msh/US/DMV/2/e/LongFast/!abcdb5df"
-    # We need to extract "msh/US/DMV/2/e/" part
+    # Extract everything before the node ID part and add our channel
     topic_parts = target_topic.split('/')
     if len(topic_parts) >= 6:
+        # Get the root topic part (e.g., "msh/US/DMV/2/e/")
         root_topic_part = '/'.join(topic_parts[:5]) + '/'
-        notification_topic = root_topic_part + channel + "/" + node_name
+        # Use recipient's node ID, not sender's
+        recipient_hex = '!' + hex(destination_id)[2:]
+        notification_topic = root_topic_part + channel + "/" + recipient_hex
     else:
-        # Fallback: use the primary root topic
-        notification_topic = root_topic + channel + "/" + node_name
+        # Fallback: use the primary root topic with recipient's node ID
+        recipient_hex = '!' + hex(destination_id)[2:]
+        notification_topic = root_topic + channel + "/" + recipient_hex
     
     if debug:
         print(f"Publishing targeted mail notification to: {notification_topic}")
@@ -1511,12 +1518,15 @@ def generate_mail_notification_packet(destination_id, encoded_message):
         print(f"Payload size: {len(payload)} bytes")
     
     # Publish to ALL root topics to ensure delivery regardless of recipient's region
+    # Use recipient's node ID in the topic path, not sender's
+    recipient_hex = '!' + hex(destination_id)[2:]
+    
     if debug:
         print(f"Root topics configured: {root_topics}")
-        print(f"Channel: {channel}, Node name: {node_name}")
+        print(f"Channel: {channel}, Recipient node: {recipient_hex}")
     
     for i, root_topic in enumerate(root_topics):
-        notification_topic = root_topic + channel + "/" + node_name
+        notification_topic = root_topic + channel + "/" + recipient_hex
         if debug:
             print(f"Publishing mail notification to topic {i+1}/{len(root_topics)}: {notification_topic}")
         
@@ -1726,11 +1736,36 @@ def send_auto_response_via_test_function(target_id):
         
         if debug:
             print(f"Sending welcome menu to {target_id}")
+            print(f"Target node topic: {get_node_topic(target_id)}")
+            print(f"Target direct message topic: {get_node_topic_for_direct_message(target_id)}")
         
-        generate_mesh_packet(target_id, encoded_message)
+        # Create proper encoded message for mail notification system
+        notification_message = mesh_pb2.Data()
+        notification_message.portnum = portnums_pb2.TEXT_MESSAGE_APP
+        notification_message.payload = welcome_text.encode("utf-8")
         
-        if debug:
-            print(f"Welcome menu sent to {target_id}")
+        # Try to send to specific topic first if we know where the user is
+        recipient_topic = get_node_topic_for_direct_message(target_id)
+        
+        if recipient_topic:
+            # Send to the specific topic where recipient was last seen
+            if debug:
+                print(f"Sending welcome message to specific topic: {recipient_topic}")
+            
+            # Use the targeted notification function instead of broadcast
+            generate_targeted_mail_notification_packet(target_id, notification_message, recipient_topic)
+            
+            if debug:
+                print(f"Welcome menu sent to {target_id} via specific topic: {recipient_topic}")
+        else:
+            # Fallback: broadcast to all topics if we don't know where they are
+            if debug:
+                print(f"No known topic for {target_id}, broadcasting to all regions")
+            
+            generate_mail_notification_packet(target_id, notification_message)
+            
+            if debug:
+                print(f"Welcome menu broadcasted to {target_id} via all topics")
         
         # Use threaded approach for delayed inbox display
         def delayed_inbox_response():
@@ -1796,7 +1831,7 @@ def send_direct_message(destination_id, message):
 
 
 def send_mail_notification(destination_id, message):
-    """Send a mail notification to a specific node - always broadcast to all topics to ensure delivery."""
+    """Send a mail notification to a specific node - try targeted delivery first, then broadcast."""
     if not client.is_connected():
         if debug:
             print("Not connected to MQTT broker, skipping mail notification")
@@ -1815,15 +1850,27 @@ def send_mail_notification(destination_id, message):
         encoded_message.payload = message.encode("utf-8")
         encoded_message.bitfield = 1
         
-        if debug:
-            print(f"Broadcasting mail notification to {destination_id} across all root topics to ensure delivery")
+        # Try to send to specific topic first if we know where the user is
+        recipient_topic = get_node_topic_for_direct_message(destination_id)
         
-        # Always broadcast to all topics to ensure cross-region delivery
-        # This ensures that users on different root topics receive notifications
-        generate_mail_notification_packet(destination_id, encoded_message)
-        
-        if debug:
-            print(f"Mail notification broadcasted to {destination_id} via all topics")
+        if recipient_topic:
+            # Send to the specific topic where recipient was last seen
+            if debug:
+                print(f"Sending mail notification to specific topic: {recipient_topic}")
+            
+            generate_targeted_mail_notification_packet(destination_id, encoded_message, recipient_topic)
+            
+            if debug:
+                print(f"Mail notification sent to {destination_id} via specific topic: {recipient_topic}")
+        else:
+            # Fallback: broadcast to all topics if we don't know where they are
+            if debug:
+                print(f"No known topic for {destination_id}, broadcasting mail notification across all root topics")
+            
+            generate_mail_notification_packet(destination_id, encoded_message)
+            
+            if debug:
+                print(f"Mail notification broadcasted to {destination_id} via all topics")
             
     except Exception as e:
         print(f"Error sending mail notification: {str(e)}")
