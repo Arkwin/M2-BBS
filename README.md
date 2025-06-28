@@ -1,4 +1,4 @@
-## Mesh Mail - A Nodeless MQTT Client that allows users sto send messages across MQTT Topcics!
+## Mesh Mail - A Nodeless MQTT Client that allows users to send messages across MQTT Topcics!
 
 Many thanks to and inspiration from:<br>
  https://github.com/arankwende/meshtastic-mqtt-client & https://github.com/joshpirihi/meshtastic-mqtt & https://github.com/pdxlocations/connect<br>
