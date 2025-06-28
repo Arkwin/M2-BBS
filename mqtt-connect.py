@@ -106,6 +106,24 @@ def update_node_topic(node_id, topic):
     node_topic_map[node_id] = topic
     if debug:
         print(f"Updated node {node_id} last seen topic to: {topic}")
+        
+def get_node_topic_for_direct_message(destination_id):
+    """Get the topic where a node was last seen, formatted for sending direct messages."""
+    base_topic = node_topic_map.get(destination_id, None)
+    
+    if base_topic:
+        # Extract root topic and reconstruct with destination node ID
+        # base_topic format: "msh/US/VA/RVA/2/e/LongFast/!somenode"
+        topic_parts = base_topic.split('/')
+        if len(topic_parts) >= 6:
+            root_topic_part = '/'.join(topic_parts[:5]) + '/'
+            destination_hex = '!' + hex(destination_id)[2:]
+            direct_topic = root_topic_part + channel + "/" + destination_hex
+            if debug:
+                print(f"Converted base topic {base_topic} to direct topic {direct_topic} for node {destination_id}")
+            return direct_topic
+    
+    return None
 
 def get_node_topic(node_id):
     """Get the topic where a node was last seen."""
@@ -486,7 +504,9 @@ def on_message(client, userdata, msg):					# pylint: disable=unused-argument
         mp = se.packet
 
     except Exception as e:
-        print(f"*** ServiceEnvelope: {str(e)}")
+        # Reduce noise - only print ServiceEnvelope errors in debug mode
+        if debug:
+            print(f"*** ServiceEnvelope: {str(e)}")
         return
 
     if len(msg.payload) > max_msg_len:
@@ -1301,13 +1321,13 @@ def generate_mesh_packet(destination_id, encoded_message):
                 else:
                     print(f"MQTT publish failed to {broadcast_topic} with code: {result.rc}")
     else:
-        # For direct messages, try to send to recipient's last known topic first
-        recipient_topic = get_node_topic(destination_id)
+        # For direct messages, try to send to recipient's last known region with their node ID
+        recipient_topic = get_node_topic_for_direct_message(destination_id)
         
         if recipient_topic:
             # Send to the specific topic where recipient was last seen
             if debug:
-                print(f"Sending direct message to recipient's last known topic: {recipient_topic}")
+                print(f"Sending direct message to recipient's targeted topic: {recipient_topic}")
                 print(f"Payload size: {len(payload)} bytes")
             
             result = client.publish(recipient_topic, payload)

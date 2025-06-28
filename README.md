@@ -1,25 +1,19 @@
-## Connect - A Nodeless MQTT Client for Meshtastic
-
-<img width="1110" alt="topology" src="https://github.com/pdxlocations/Meshtastic-MQTT-Connect/assets/117498748/a0bf657d-2f91-4b7e-8f77-95cecb621153">
-
+## Mesh Mail - A Nodeless MQTT Client that allows users sto send messages across MQTT Topcics!
 
 Many thanks to and inspiration from:<br>
- https://github.com/arankwende/meshtastic-mqtt-client & https://github.com/joshpirihi/meshtastic-mqtt<br>
+ https://github.com/arankwende/meshtastic-mqtt-client & https://github.com/joshpirihi/meshtastic-mqtt & https://github.com/pdxlocations/connect<br>
 <b>Powered by Meshtastic.org</b>
 
 ### Installation
 
-MacOS users may need to install tkinter using brew:
-```bash
-brew install python-tk
-```
+
 Then create a virtual environment and install Connect:
 ```bash
 python3 -m venv connect
 cd connect && source bin/activate
-pip3 install meshtastic paho-mqtt tk cryptography
-git clone https://github.com/pdxlocations/connect
-cd connect
+pip3 install meshtastic paho-mqtt cryptography
+git clone https://github.com/Arkwin/Mesh-Mail.git
+cd Mesh-Mail
 ```
 
 ### Running the Client
@@ -27,37 +21,57 @@ cd connect
 python mqtt-connect.py
 ```
 
-*** Mac OS Sonoma (and maybe others) ***
-There is an upstream bug in Tkinter where mouse clicks in the UI are not registered, unless the mouse is in motion.
-The current workaround is to move the application window away from it's opening state, and/or move the mouse slightly while clicking.
-This is a bug with TCL Version 8.6.12 and is apparently fixed in 8.6.13
+### Use 
+
+## Mesh Mail System
+
+This system provides a persistent mail service for Meshtastic users across multiple regions. Users can send and receive mail messages that are stored in a database, allowing for asynchronous communication even when nodes are offline.
+
+### Getting Started with Mail
+
+**Accessing the Mail System:**
+Send any direct message to the mail server node (MMX) to receive the welcome menu.
+
+### Using the Mail System
+
+Once you send a message you will be greated with your personal inbox and mail options either enter the mail number to read the message or C to compose a message to someone on any of the connected MQTT topics.
+
+#### Composing Mail
+1. Send `C` to enter compose mode
+2. Enter recipient node ID in format `!12345678` (hex format)
+3. Enter subject line when prompted
+4. Enter message content when prompted
+5. Mail is automatically sent and recipient receives notification
 
 
-<img width="1113" alt="Screenshot 2024-02-16 at 2 46 56 PM" src="https://github.com/pdxlocations/Meshtastic-MQTT-Connect/assets/117498748/a7322f8d-0a31-4864-a558-aab725c5f92e">
+### Multi-Region Support
 
-### TLS 
+The mail system automatically works across different Meshtastic regions:
+- **Supported Regions:** DMV, VA, MD, VA/RVA
+- **Cross-Region Delivery:** Messages automatically route between regions
+- **Smart Routing:** System remembers where users were last seen for efficient delivery
 
-TLS is supported by entering a broker ending in `:8883` You will need to install a valid cacert.pem file.
+### Configuration
 
-In the directory in which you run Meshtastic-MQTT-Connect run the following commands once:
-```sh
-pip3 install certifi
-ln -s `python3 -c 'import certifi ; print(certifi.where())'` cacert.pem
-```
+Edit `config.ini` to customize:
+- **MQTT Settings:** Broker, credentials, topics
+- **Node Information:** Your node number, names, location  
+- **Mail Timing:** Notification delays and throttling
+- **Debug Options:** Detailed logging and message tracking
 
-### Interactive Map
-To view the interactive map you may need to install folium with
+### Database Storage
 
-`pip install folium`
+- Mail messages are stored persistently in SQLite database
+- Node information is cached for faster lookups
+- Message history is maintained for debugging
+- Automatic database setup on first run
 
-In meshtastic-mqtt-connect.py set `record_locations = True` in the configuration options around line 44.
+### Features
 
-After you've connected to a channel for some time and received location information from at least one station, open mmc-map.py and enter your channel name.
-
-Run mmc-map.py and a file will be generated called mmc-map.html which may be opened in a browser.
-
-<img width="964" alt="Screenshot 2024-01-10 at 11 12 37 PM" src="https://github.com/pdxlocations/Meshtastic-MQTT-Connect/assets/117498748/2ab888bb-ac0b-448a-bd23-4648345de3a8">
-
-
-
-![Alt](https://repobeats.axiom.co/api/embed/dbe69ee806d8db9d81e8342b70ef83fe1df87b8e.svg "Repobeats analytics image")
+- ✅ **Persistent Storage** - Messages saved even when nodes offline
+- ✅ **Cross-Region Delivery** - Works across multiple Meshtastic regions  
+- ✅ **Smart Notifications** - Users notified of new mail with emoji
+- ✅ **Anti-Spam Protection** - Throttling prevents message flooding
+- ✅ **Multi-Topic Support** - Automatic routing to correct regional topics
+- ✅ **Database Persistence** - All mail stored in SQLite database
+- ✅ **Menu Navigation** - Easy-to-use text-based interface
