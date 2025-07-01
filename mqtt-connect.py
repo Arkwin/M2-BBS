@@ -111,10 +111,16 @@ def get_node_topic_for_direct_message(destination_id):
     """Get the topic where a node was last seen, formatted for sending direct messages."""
     base_topic = node_topic_map.get(destination_id, None)
     
+    if debug:
+        print(f"Looking up topic for destination {destination_id}, found: {base_topic}")
+    
     if base_topic:
         # Extract root topic and reconstruct with destination node ID
         # base_topic format: "msh/US/VA/RVA/2/e/LongFast/!somenode"
         topic_parts = base_topic.split('/')
+        if debug:
+            print(f"Topic parts: {topic_parts}, length: {len(topic_parts)}")
+            
         if len(topic_parts) >= 6:
             root_topic_part = '/'.join(topic_parts[:5]) + '/'
             destination_hex = '!' + hex(destination_id)[2:]
@@ -122,6 +128,12 @@ def get_node_topic_for_direct_message(destination_id):
             if debug:
                 print(f"Converted base topic {base_topic} to direct topic {direct_topic} for node {destination_id}")
             return direct_topic
+        else:
+            if debug:
+                print(f"Topic parts insufficient for direct message: {len(topic_parts)} < 6")
+    else:
+        if debug:
+            print(f"No base topic found for destination {destination_id}")
     
     return None
 
@@ -1335,6 +1347,9 @@ def generate_mesh_packet(destination_id, encoded_message):
     else:
         # For direct messages, try to send to recipient's last known region with their node ID
         recipient_topic = get_node_topic_for_direct_message(destination_id)
+        
+        if debug:
+            print(f"Direct message logic: recipient_topic = {recipient_topic}")
         
         if recipient_topic:
             # Send to the specific topic where recipient was last seen
