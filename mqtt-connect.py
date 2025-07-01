@@ -2031,7 +2031,7 @@ def handle_compose_content(destination_id, content_input):
         store_mail_in_db(destination_id, recipient_node_id, subject, content_input)
         
         # Send confirmation to sender
-        success_msg = f"Mail sent to {recipient_node_id}!\nSubject: {subject}\n\nReply [B]ack to return to mail menu."
+        success_msg = f"Mail sent to {recipient_node_id}!\nSubject: {subject}"
         send_direct_message(destination_id, success_msg)
         
         # Notify recipient that they have new mail
@@ -2044,9 +2044,17 @@ def handle_compose_content(destination_id, content_input):
         notification_thread = threading.Thread(target=delayed_mail_notification, daemon=True)
         notification_thread.start()
         
-        # Reset state
-        update_user_state(destination_id, 'mail_menu')
-        update_submenu_state(destination_id, 'mail_menu')
+        # Automatically show inbox after sending mail
+        def delayed_inbox_load():
+            time.sleep(3.0)  # Wait 3 seconds after confirmation message
+            update_user_state(destination_id, 'viewing_inbox')
+            update_submenu_state(destination_id, 'inbox')
+            update_global_state(destination_id, 'mail')
+            send_inbox(destination_id, show_instructions=True)
+        
+        # Start the inbox load in a separate thread
+        inbox_thread = threading.Thread(target=delayed_inbox_load, daemon=True)
+        inbox_thread.start()
     else:
         error_msg = "Error: No recipient/subject found. Please start over.\n\nReply [B]ack to return to mail menu."
         send_direct_message(destination_id, error_msg)
