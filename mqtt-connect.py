@@ -786,9 +786,9 @@ def process_message(mp, text_payload, is_encrypted):
                     print(f"Global state: {get_global_state(from_node)}")
                     print(f"Submenu state: {get_submenu_state(from_node)}")
                     print(f"User state: {get_user_state(from_node)}")
-                # Handle mail selection in a separate thread with a small delay
+                # Handle mail selection in a separate thread with a delay
                 def delayed_mail_content_response():
-                    time.sleep(1.0)  # Wait 1 second
+                    time.sleep(mail_response_delay)  # Use configurable mail response delay
                     submenu_state = get_submenu_state(from_node)
                     if submenu_state in ['inbox', 'viewing_inbox']:
                         send_mail_content(from_node, 'inbox', mail_number)
