@@ -159,7 +159,7 @@ def load_config():
     global mqtt_broker, mqtt_port, mqtt_username, mqtt_password, root_topic, root_topics, channel, key
     global node_number, client_long_name, client_short_name, lat, lon, alt
     global bbs_enabled, bbs_nodes, debug, auto_reconnect, auto_reconnect_delay
-    global mail_notification_delay, mail_notification_throttle_delay, mail_notification_min_interval
+    global mail_notification_delay, mail_notification_throttle_delay, mail_notification_min_interval, mail_compose_step_delay, mail_menu_delay, mail_response_delay
     global print_service_envelope, print_message_packet, print_text_message, print_node_info
     global print_telemetry, print_failed_encryption_packet, print_position_report, color_text
     global display_encrypted_emoji, display_dm_emoji, display_lookup_button, display_private_dms
@@ -211,6 +211,9 @@ def load_config():
         mail_notification_delay = config.getfloat('DEFAULT', 'mail_notification_delay', fallback=6.0)
         mail_notification_throttle_delay = config.getfloat('DEFAULT', 'mail_notification_throttle_delay', fallback=2.0)
         mail_notification_min_interval = config.getfloat('DEFAULT', 'mail_notification_min_interval', fallback=30.0)
+        mail_compose_step_delay = config.getfloat('DEFAULT', 'mail_compose_step_delay', fallback=1.0)
+        mail_menu_delay = config.getfloat('DEFAULT', 'mail_menu_delay', fallback=0.5)
+        mail_response_delay = config.getfloat('DEFAULT', 'mail_response_delay', fallback=1.0)
         print_service_envelope = config.getboolean('DEFAULT', 'print_service_envelope', fallback=False)
         print_message_packet = config.getboolean('DEFAULT', 'print_message_packet', fallback=False)
         print_text_message = config.getboolean('DEFAULT', 'print_text_message', fallback=False)
@@ -269,6 +272,12 @@ def load_config():
         display_private_dms = False
         record_locations = False
         node_info_interval_minutes = 15
+        mail_notification_delay = 6.0
+        mail_notification_throttle_delay = 2.0
+        mail_notification_min_interval = 30.0
+        mail_compose_step_delay = 1.0
+        mail_menu_delay = 0.5
+        mail_response_delay = 1.0
 
 
 def save_config():
@@ -739,7 +748,7 @@ def process_message(mp, text_payload, is_encrypted):
                     print(f"Mail menu selection detected: {text_payload}")
                 # Handle mail menu selection in a separate thread with a small delay
                 def delayed_mail_response():
-                    time.sleep(1.0)  # Wait 1 second
+                    time.sleep(mail_menu_delay)  # Configurable menu delay
                     handle_mail_selection(from_node, text_payload)
                 
                 mail_thread = threading.Thread(target=delayed_mail_response, daemon=True)
@@ -867,7 +876,7 @@ def process_message(mp, text_payload, is_encrypted):
                     print(f"Mail content input detected: {text_payload}")
                 # Handle content input in a separate thread with a small delay
                 def delayed_content_response():
-                    time.sleep(1.0)  # Wait 1 second
+                    time.sleep(mail_menu_delay)  # Configurable menu delay
                     handle_compose_content(from_node, text_payload)
                 
                 content_thread = threading.Thread(target=delayed_content_response, daemon=True)
@@ -879,7 +888,7 @@ def process_message(mp, text_payload, is_encrypted):
                     print(f"Mail subject input detected: {text_payload}")
                 # Handle subject input in a separate thread with a small delay
                 def delayed_subject_response():
-                    time.sleep(1.0)  # Wait 1 second
+                    time.sleep(mail_menu_delay)  # Configurable menu delay
                     handle_compose_subject(from_node, text_payload)
                 
                 subject_thread = threading.Thread(target=delayed_subject_response, daemon=True)
@@ -893,7 +902,7 @@ def process_message(mp, text_payload, is_encrypted):
                     print(f"Submenu state: {get_submenu_state(from_node)}")
                 # Handle mail composition in a separate thread with a small delay
                 def delayed_compose_response():
-                    time.sleep(1.0)  # Wait 1 second
+                    time.sleep(mail_menu_delay)  # Configurable menu delay
                     handle_compose_mail(from_node, text_payload)
                 
                 compose_thread = threading.Thread(target=delayed_compose_response, daemon=True)
@@ -1921,14 +1930,14 @@ or type [B]ack to return to mail menu."""
     update_submenu_state(destination_id, 'compose_mail')
     
     # Add a small delay to avoid race conditions
-    time.sleep(2.0)
+    time.sleep(mail_response_delay)
     send_direct_message(destination_id, compose_menu)
 
 
 def handle_compose_mail(destination_id, recipient_input):
     """Handle mail composition - recipient input."""
     # Add delay to prevent race conditions
-    time.sleep(2.0)
+    time.sleep(mail_compose_step_delay)
     
     # Strip whitespace from input
     recipient_input = recipient_input.strip()
@@ -1973,7 +1982,7 @@ def handle_compose_mail(destination_id, recipient_input):
 def handle_compose_subject(destination_id, subject_input):
     """Handle mail composition - subject input."""
     # Add delay to prevent race conditions
-    time.sleep(2.0)
+    time.sleep(mail_compose_step_delay)
     
     user_state = get_user_state(destination_id)
     
@@ -1994,7 +2003,7 @@ def handle_compose_subject(destination_id, subject_input):
 def handle_compose_content(destination_id, content_input):
     """Handle mail composition - content input and final storage."""
     # Add delay to prevent race conditions
-    time.sleep(2.0)
+    time.sleep(mail_compose_step_delay)
     
     user_state = get_user_state(destination_id)
     
