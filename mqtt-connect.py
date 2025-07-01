@@ -991,7 +991,7 @@ def process_message(mp, text_payload, is_encrypted):
                     print(f"Reply mail command detected from {from_node}")
                 # Handle reply mail command
                 def delayed_reply_mail_response():
-                    time.sleep(1.0)  # Wait 1 second
+                    time.sleep(mail_response_delay)  # Use configurable mail response delay
                     user_state = get_user_state(from_node)
                     if user_state and user_state.startswith('viewing_mail:'):
                         parts = user_state.split(':')
@@ -1012,7 +1012,7 @@ def process_message(mp, text_payload, is_encrypted):
                             
                             # Ask for content directly (skip subject since it's pre-filled)
                             content_prompt = f"Reply to: {original_sender}\nSubject: {reply_subject}\n\nEnter your reply message:"
-                            time.sleep(2.0)
+                            time.sleep(mail_compose_step_delay)  # Use configurable compose step delay
                             send_direct_message(from_node, content_prompt)
                         else:
                             error_msg = "Cannot reply to sent mail or mail not found."
